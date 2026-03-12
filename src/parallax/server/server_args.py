@@ -92,6 +92,11 @@ def parse_args() -> argparse.Namespace:
         choices=["float16", "bfloat16", "float32"],
         help="Data type for model weights and computations",
     )
+    parser.add_argument(
+        "--enforce-eager",
+        action="store_true",
+        help="Disable vLLM graph capture/torch.compile and run eagerly.",
+    )
 
     # KV Cache configuration
     parser.add_argument(

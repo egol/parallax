@@ -9,6 +9,7 @@ import torch.distributed
 import vllm.distributed.parallel_state as parallel_state
 from mlx_lm.utils import load_config
 from vllm.config import (
+    AttentionConfig,
     CacheConfig,
     DeviceConfig,
     LoadConfig,
@@ -19,6 +20,7 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.distributed.parallel_state import GroupCoordinator as VLLMGroupCoordinator
 from vllm.lora.request import LoRARequest
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -45,6 +47,18 @@ from parallax_utils.logging_config import get_logger
 from parallax_utils.prepare_adapter import download_adapter_config
 
 logger = get_logger(__name__)
+
+
+def _resolve_attention_config(attention_backend: str) -> AttentionConfig:
+    backend_mapping = {
+        "torch_native": AttentionBackendEnum.TORCH_SDPA,
+        "flashinfer": AttentionBackendEnum.FLASHINFER,
+        "triton": AttentionBackendEnum.TRITON_ATTN,
+        "fa3": AttentionBackendEnum.FLASH_ATTN,
+    }
+    backend = backend_mapping.get(attention_backend, AttentionBackendEnum.TORCH_SDPA)
+    flash_attn_version = 3 if attention_backend == "fa3" else None
+    return AttentionConfig(backend=backend, flash_attn_version=flash_attn_version)
 
 
 class ParallaxVLLMGroupCoordinator(VLLMGroupCoordinator):
@@ -367,6 +381,7 @@ def initialize_vllm_model_runner(
     max_sequence_length: int,
     max_num_tokens_per_batch: int = 16384,
     dtype: str = "float16",
+    enforce_eager: bool = False,
     moe_runner_backend: str = "auto",
     tp_rank: int = 0,
     tp_size: int = 1,
@@ -389,7 +404,9 @@ def initialize_vllm_model_runner(
 
     config = load_config(model_path)
     tokenizer = load_tokenizer(model_path, eos_token_ids=config.get("eos_token_id", None))
-    dtype = config.get("torch_dtype", "bfloat16")
+    requested_dtype = dtype or "auto"
+    if requested_dtype == "auto":
+        requested_dtype = config.get("torch_dtype", "bfloat16")
 
     num_hidden_layers = config.get("num_hidden_layers")
     is_first_peer = start_layer == 0
@@ -498,10 +515,11 @@ def initialize_vllm_model_runner(
         tokenizer=str(model_path),
         tokenizer_mode="auto",
         trust_remote_code=True,
-        dtype=dtype,
+        dtype=requested_dtype,
         seed=0,
         max_model_len=max_len,
         max_logprobs=1,
+        enforce_eager=enforce_eager,
         enable_return_routed_experts=enable_return_routed_experts,
     )
 
@@ -565,7 +583,7 @@ def initialize_vllm_model_runner(
             max_loras=max_loras,
             fully_sharded_loras=fully_sharded_loras,
             max_cpu_loras=max_cpu_loras,
-            lora_dtype=dtype,
+            lora_dtype=requested_dtype,
         )
         logger.info(f"LoRA config: {lora_config}")
 
@@ -587,6 +605,7 @@ def initialize_vllm_model_runner(
         scheduler_config=scheduler_config,
         device_config=device_config,
         load_config=load_config_for_config,
+        attention_config=_resolve_attention_config(attention_backend),
         lora_config=lora_config,
         speculative_config=None,
         quant_config=None,

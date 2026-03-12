@@ -19,6 +19,7 @@ def create_executor_config(args: argparse.Namespace, shared_state=None, conn=Non
         "start_layer": args.start_layer,
         "end_layer": args.end_layer,
         "dtype": args.dtype,
+        "enforce_eager": getattr(args, "enforce_eager", False),
         "max_sequence_length": args.max_sequence_length if "max_sequence_length" in args else None,
         "max_batch_size": args.max_batch_size if "max_batch_size" in args else None,
         "kv_block_size": args.kv_block_size,

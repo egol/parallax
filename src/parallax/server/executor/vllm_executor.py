@@ -40,6 +40,7 @@ class VLLMExecutor(BaseExecutor):
         start_layer: int,
         end_layer: int,
         dtype: str = "float16",
+        enforce_eager: bool = False,
         # Device override
         device: Optional[str] = None,
         use_hfcache: bool = False,
@@ -127,6 +128,7 @@ class VLLMExecutor(BaseExecutor):
             "max_sequence_length": max_sequence_length,
             "max_num_tokens_per_batch": max_num_tokens_per_batch,
             "dtype": dtype,
+            "enforce_eager": enforce_eager,
             "moe_runner_backend": moe_runner_backend,
             "tp_rank": tp_rank,
             "tp_size": tp_size,
