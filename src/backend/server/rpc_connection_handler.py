@@ -46,6 +46,9 @@ class RPCConnectionHandler(ConnectionHandler):
         #     "max_sequence_length": 1024,
         # }
         logger.info(f"receive node_join request: {message}")
+        if self.scheduler is None:
+            logger.warning("Received node_join before scheduler initialization completed")
+            return {"pending": True, "reason": "scheduler_not_initialized"}
         try:
             node = self.build_node(message)
             self.scheduler.enqueue_join(node)
@@ -76,6 +79,8 @@ class RPCConnectionHandler(ConnectionHandler):
         second dict records weight refit information.
         """
         logger.debug(f"receive node_update request: {message}")
+        if self.scheduler is None:
+            return {"pending": True, "reason": "scheduler_not_initialized"}, {}
         try:
             node = self.build_node(message)
             # Check if node exists in scheduler

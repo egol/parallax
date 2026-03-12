@@ -350,6 +350,9 @@ class Node:
 
     def roofline_layer_latency_ms(self) -> float:
         """Get the roofline layer latency for this node."""
+        if self.num_current_layers <= 0:
+            return 0.0
+
         # Compute an effective compute speedup due to quantization.
         bytes_per_elem = float(self.model_info.param_bytes_per_element)
         # bf16/fp16 baseline ~2 bytes

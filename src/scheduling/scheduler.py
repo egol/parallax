@@ -261,7 +261,9 @@ class Scheduler:
 
     def checking_node_heartbeat(self) -> None:
         """Check the heartbeat of all nodes."""
-        for node in self.node_manager.active_nodes:
+        # Stale nodes can be stuck in waiting during failed bootstrap/join paths,
+        # so heartbeat eviction has to cover the full registered set.
+        for node in list(self.node_manager.nodes):
             if time.time() - node.last_heartbeat > self.heartbeat_timeout:
                 logger.debug(f"Node {node.node_id} heartbeat timeout")
                 # Route leave through the event loop so global rebalance/reboot is serialized.

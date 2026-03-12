@@ -6,6 +6,7 @@ from typing import Dict
 import fastapi
 import uvicorn
 from fastapi import Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from lattica import Lattica
@@ -23,6 +24,19 @@ import uuid
 # Fast API
 app = fastapi.FastAPI(
     openapi_url="/openapi.json",
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:1420",
+        "http://127.0.0.1:1420",
+        "http://tauri.localhost",
+        "https://tauri.localhost",
+        "tauri://localhost",
+    ],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 

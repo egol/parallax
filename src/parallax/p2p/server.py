@@ -516,11 +516,28 @@ class GradientServer:
                 if self.manual_layer_assignment:
                     node_info["manual_layer_assignment"] = True
 
-                response = self.scheduler_stub.node_join(node_info)
-                response = response.result(timeout=300)
-                if response == {}:
-                    logger.error("Failed to join scheduler")
-                    exit(1)
+                while True:
+                    response = self.scheduler_stub.node_join(node_info)
+                    response = response.result(timeout=300)
+                    if response.get("pending"):
+                        logger.info(
+                            "Scheduler peer is reachable but no model is initialized yet, retrying node_join in 2 seconds"
+                        )
+                        time.sleep(2)
+                        node_info = self.get_node_info()
+                        if node_info == {}:
+                            logger.error("Failed to refresh node info, try again after 10 seconds")
+                            self.lattica.close()
+                            self.lattica = None
+                            time.sleep(10)
+                            return self.run()
+                        if self.manual_layer_assignment:
+                            node_info["manual_layer_assignment"] = True
+                        continue
+                    if response == {}:
+                        logger.error("Failed to join scheduler")
+                        exit(1)
+                    break
 
                 logger.info(f"Join scheduler response: {response}")
 
@@ -763,6 +780,12 @@ class GradientServer:
 
                             # Print layer allocation information
                             if response and isinstance(response, dict):
+                                if response.get("pending"):
+                                    logger.debug(
+                                        "Heartbeat acknowledged before scheduler initialization finished"
+                                    )
+                                    time.sleep(2)
+                                    continue
                                 start_layer = response.get("start_layer")
                                 end_layer = response.get("end_layer")
                                 model_name = response.get("model_name")

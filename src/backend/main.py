@@ -123,11 +123,7 @@ async def scheduler_init(raw_request: Request):
         return JSONResponse(
             content={
                 "type": "scheduler_init",
-                "data": {
-                    "model_name": model_name,
-                    "init_nodes_num": init_nodes_num,
-                    "is_local_network": is_local_network,
-                },
+                "data": scheduler_manage.get_cluster_status()["data"],
             },
             status_code=200,
         )
@@ -136,6 +132,31 @@ async def scheduler_init(raw_request: Request):
         return JSONResponse(
             content={
                 "type": "scheduler_init",
+                "error": str(e),
+            },
+            status_code=500,
+        )
+
+
+@app.post("/scheduler/bootstrap")
+async def scheduler_bootstrap(raw_request: Request):
+    request_data = await raw_request.json()
+    is_local_network = request_data.get("is_local_network", True)
+
+    try:
+        scheduler_manage.bootstrap_network(is_local_network)
+        return JSONResponse(
+            content={
+                "type": "scheduler_bootstrap",
+                "data": scheduler_manage.get_cluster_status()["data"],
+            },
+            status_code=200,
+        )
+    except Exception as e:
+        logger.exception(f"Error bootstrapping scheduler network: {e}")
+        return JSONResponse(
+            content={
+                "type": "scheduler_bootstrap",
                 "error": str(e),
             },
             status_code=500,

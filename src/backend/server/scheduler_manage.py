@@ -1,6 +1,6 @@
 import threading
 import time
-from typing import List
+from typing import Any, Dict, List, Optional
 
 from lattica import Lattica
 
@@ -39,6 +39,8 @@ class SchedulerManage:
         """Initialize the manager with networking bootstrap parameters."""
         self.initial_peers = initial_peers
         self.relay_servers = relay_servers
+        self.configured_initial_peers = list(initial_peers)
+        self.configured_relay_servers = list(relay_servers)
         self.dht_prefix = dht_prefix
         self.host_maddrs = host_maddrs
         self.announce_maddrs = announce_maddrs
@@ -53,6 +55,7 @@ class SchedulerManage:
         self.lattica = None
         self.stubs = {}
         self.is_local_network = False
+        self.network_signature = None
 
     def run(self, model_name, init_nodes_num, is_local_network=True):
         """
@@ -63,14 +66,8 @@ class SchedulerManage:
         logger.debug(
             f"SchedulerManage starting: model_name={model_name}, init_nodes_num={init_nodes_num}"
         )
-        self.is_local_network = is_local_network
-        if not is_local_network and not self.initial_peers and not self.relay_servers:
-            logger.debug("Using public relay servers")
-            self.initial_peers = PUBLIC_INITIAL_PEERS
-            self.relay_servers = PUBLIC_RELAY_SERVERS
-
+        self.bootstrap_network(is_local_network)
         self._start_scheduler(model_name, init_nodes_num)
-        self._start_lattica()
         self.completion_handler = TransformerConnectionHandler(
             lattica=self.lattica,
             recv_from_peer_addr="",
@@ -79,10 +76,22 @@ class SchedulerManage:
             block_end_index=1,
         )
 
+    def bootstrap_network(self, is_local_network=True):
+        """
+        Start only the scheduler's P2P network so workers/chat can discover the
+        scheduler peer before a model is initialized.
+        """
+        self.is_local_network = is_local_network
+        initial_peers, relay_servers = self._resolve_network_config(is_local_network)
+        self._start_lattica(initial_peers, relay_servers)
+
     def is_running(self):
         """
         Returns True if the scheduler is running, False otherwise.
         """
+        return self.scheduler is not None
+
+    def is_initialized(self):
         return self.scheduler is not None
 
     def stop(self):
@@ -113,6 +122,9 @@ class SchedulerManage:
     def get_is_local_network(self):
         return self.is_local_network
 
+    def get_network_mode(self):
+        return "local" if self.is_local_network else "relay"
+
     def get_peer_id(self):
         if self.lattica is None:
             return None
@@ -135,20 +147,110 @@ class SchedulerManage:
         return self.scheduler.need_more_nodes() if self.scheduler else False
 
     def get_cluster_status(self):
+        per_pipeline_min, total_capacity, current_capacity = self._get_pipeline_capacity_report()
         return {
             "type": "cluster_status",
             "data": {
                 "status": self.get_schedule_status(),
                 "model_name": self.model_name,
                 "init_nodes_num": self.init_nodes_num,
+                "initialized": self.is_initialized(),
+                "scheduler_peer_id": self.get_peer_id(),
+                "network_mode": self.get_network_mode(),
                 "node_join_command": get_node_join_command(
                     self.get_peer_id(), self.is_local_network
                 ),
                 "node_list": self.get_node_list(),
                 "need_more_nodes": self.need_more_nodes(),
-                "max_running_request": (
-                    self.scheduler.report_pipeline_capacity()[1] if self.scheduler else 0
+                "max_running_request": total_capacity,
+                "topology": self.get_topology_snapshot(
+                    per_pipeline_min, total_capacity, current_capacity
                 ),
+            },
+        }
+
+    def _get_pipeline_capacity_report(self):
+        if self.scheduler is None:
+            return None, 0, 0
+        return self.scheduler.node_manager.report_pipeline_capacity(ready_only=True)
+
+    def get_topology_snapshot(
+        self,
+        per_pipeline_min: Optional[Dict[int, tuple[int, int]]],
+        total_capacity: int,
+        current_capacity: int,
+    ) -> Dict[str, Any]:
+        if self.scheduler is None:
+            return {
+                "nodes": [],
+                "pipelines": [],
+                "edges": [],
+                "totals": {
+                    "registered_pipelines": 0,
+                    "ready_pipelines": 0,
+                    "total_capacity": 0,
+                    "current_capacity": 0,
+                    "joined_nodes": 0,
+                },
+            }
+
+        node_manager = self.scheduler.node_manager
+        registered_pipelines = node_manager.get_registered_pipelines()
+        node_lookup = {node.node_id: node for node in node_manager.nodes}
+        pipeline_membership: Dict[str, int] = {}
+        stage_lookup: Dict[str, int] = {}
+        pipelines: List[Dict[str, Any]] = []
+        edges: List[Dict[str, Any]] = []
+
+        for pipeline_id, pipeline in sorted(registered_pipelines.items()):
+            pipeline.recompute_capacity()
+            min_capacity, remaining_capacity = (
+                per_pipeline_min.get(pipeline_id, (pipeline.min_node_capacity, pipeline.min_remaining_capacity))
+                if per_pipeline_min is not None
+                else (pipeline.min_node_capacity, pipeline.min_remaining_capacity)
+            )
+            pipelines.append(
+                {
+                    "id": pipeline_id,
+                    "ready": pipeline.is_ready,
+                    "min_capacity": int(min_capacity),
+                    "remaining_capacity": int(remaining_capacity),
+                    "node_ids": list(pipeline.node_ids),
+                }
+            )
+            for stage_index, node in enumerate(pipeline.nodes):
+                pipeline_membership[node.node_id] = pipeline_id
+                stage_lookup[node.node_id] = stage_index
+                if stage_index > 0:
+                    previous = pipeline.nodes[stage_index - 1]
+                    edges.append(
+                        {
+                            "id": f"{pipeline_id}:{previous.node_id}->{node.node_id}",
+                            "pipeline_id": pipeline_id,
+                            "source": previous.node_id,
+                            "target": node.node_id,
+                        }
+                    )
+
+        nodes = [
+            self.build_node_info(
+                node,
+                pipeline_id=pipeline_membership.get(node.node_id),
+                stage_index=stage_lookup.get(node.node_id),
+            )
+            for node in node_manager.nodes
+        ]
+
+        return {
+            "nodes": nodes,
+            "pipelines": pipelines,
+            "edges": edges,
+            "totals": {
+                "registered_pipelines": len(pipelines),
+                "ready_pipelines": sum(1 for pipeline in pipelines if pipeline["ready"]),
+                "total_capacity": int(total_capacity),
+                "current_capacity": int(current_capacity),
+                "joined_nodes": len(node_lookup),
             },
         }
 
@@ -158,13 +260,34 @@ class SchedulerManage:
 
         return [self.build_node_info(node) for node in self.scheduler.node_manager.nodes]
 
-    def build_node_info(self, node):
+    def build_node_info(
+        self,
+        node,
+        *,
+        pipeline_id: Optional[int] = None,
+        stage_index: Optional[int] = None,
+    ):
+        latency_ms = node.layer_latency_ms
         return {
             "node_id": node.node_id,
             "status": NODE_STATUS_AVAILABLE if node.is_active else NODE_STATUS_WAITING,
             "gpu_num": node.hardware.num_gpus,
             "gpu_name": node.hardware.gpu_name,
             "gpu_memory": node.hardware.memory_gb,
+            "device": node.hardware.device,
+            "start_layer": node.start_layer,
+            "end_layer": node.end_layer,
+            "current_requests": node.current_requests,
+            "max_requests": node.max_requests,
+            "assigned_request_count": self.scheduler.node_manager.node_assigned_request_count.get(
+                node.node_id, 0
+            )
+            if self.scheduler
+            else 0,
+            "pipeline_id": pipeline_id,
+            "stage_index": stage_index,
+            "is_active": node.is_active,
+            "layer_latency_ms": None if latency_ms == float("inf") else latency_ms,
         }
 
     def _start_scheduler(self, model_name, init_nodes_num):
@@ -201,11 +324,50 @@ class SchedulerManage:
         logger.debug("Scheduler background thread started (poll_interval=0.05)")
         logger.info("Nodes will automatically rejoin via heartbeat (node_update) mechanism")
 
-    def _start_lattica(self):
+    def _resolve_network_config(self, is_local_network: bool):
+        initial_peers = list(self.configured_initial_peers)
+        relay_servers = list(self.configured_relay_servers)
+        if not is_local_network and not initial_peers and not relay_servers:
+            logger.debug("Using public relay servers")
+            initial_peers = list(PUBLIC_INITIAL_PEERS)
+            relay_servers = list(PUBLIC_RELAY_SERVERS)
+        return initial_peers, relay_servers
+
+    def _network_signature_for(
+        self, initial_peers: List[str], relay_servers: List[str]
+    ) -> tuple:
+        return (
+            self.is_local_network,
+            tuple(initial_peers),
+            tuple(relay_servers),
+            tuple(self.host_maddrs),
+            tuple(self.announce_maddrs),
+        )
+
+    def _stop_lattica(self):
+        if self.lattica is None:
+            return
+        try:
+            self.lattica.close()
+        except Exception as e:
+            logger.warning(f"Failed to close Lattica cleanly: {e}")
+        self.lattica = None
+        self.connection_handler = None
+        self.network_signature = None
+        self.stubs = {}
+
+    def _start_lattica(self, initial_peers: List[str], relay_servers: List[str]):
         """
         Initialize and start the Lattica P2P node used for RPCs.
-        If Lattica already exists, it will be reused (no restart), but connection_handler will be updated.
+        If the network config changes, restart Lattica so peer discovery state
+        matches the active local/relay mode.
         """
+        signature = self._network_signature_for(initial_peers, relay_servers)
+
+        if self.lattica is not None and self.network_signature != signature:
+            logger.info("Restarting Lattica because the scheduler network mode changed")
+            self._stop_lattica()
+
         # Reuse existing Lattica if running
         if self.lattica is not None:
             logger.debug("Lattica already running, reusing existing instance")
@@ -227,23 +389,24 @@ class SchedulerManage:
             f"Starting Lattica with host_maddrs={self.host_maddrs}, mdns=False, dht_prefix={self.dht_prefix}"
         )
         self.lattica = Lattica.builder().with_listen_addrs(self.host_maddrs).with_key_path(".")
+        self.network_signature = signature
 
-        if len(self.relay_servers) > 0:
-            logger.info(f"Using relay servers: {self.relay_servers}")
-            self.lattica.with_relay_servers(self.relay_servers).with_dcutr(True).with_protocol("")
+        if len(relay_servers) > 0:
+            logger.info(f"Using relay servers: {relay_servers}")
+            self.lattica.with_relay_servers(relay_servers).with_dcutr(True).with_protocol("")
 
         if len(self.announce_maddrs) > 0:
             logger.info(f"Using announce maddrs: {self.announce_maddrs}")
             self.lattica.with_external_addrs(self.announce_maddrs)
 
-        if len(self.initial_peers) > 0:
-            logger.info(f"Using initial peers: {self.initial_peers}")
-            self.lattica.with_bootstraps(self.initial_peers)
+        if len(initial_peers) > 0:
+            logger.info(f"Using initial peers: {initial_peers}")
+            self.lattica.with_bootstraps(initial_peers)
 
         self.lattica.build()
         logger.debug("Lattica node built")
 
-        if len(self.relay_servers) > 0:
+        if len(relay_servers) > 0:
             try:
                 is_symmetric_nat = self.lattica.is_symmetric_nat()
                 if is_symmetric_nat is None:

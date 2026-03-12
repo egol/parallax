@@ -102,6 +102,7 @@ def create_from_args(
     elif device == "mlx":
         from parallax.server.executor.mlx_executor import MLXExecutor
 
+        config.pop("enforce_eager", None)
         executor = MLXExecutor(**config)
     else:
         raise ValueError(f"Unsupported device type: {device}")
