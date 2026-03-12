@@ -56,6 +56,8 @@ class SchedulerManage:
         self.stubs = {}
         self.is_local_network = False
         self.network_signature = None
+        self.discovered_nodes: Dict[str, Dict[str, Any]] = {}
+        self.discovered_node_ttl_seconds = 15.0
 
     def run(self, model_name, init_nodes_num, is_local_network=True):
         """
@@ -107,6 +109,8 @@ class SchedulerManage:
             # Wait a bit for threads to finish
             time.sleep(0.1)
             self.scheduler = None
+            if hasattr(self, "connection_handler") and self.connection_handler is not None:
+                self.connection_handler.scheduler = None
             logger.debug("Scheduler stopped")
 
         # Note: We don't close Lattica here to allow model switching without restarting P2P
@@ -180,9 +184,13 @@ class SchedulerManage:
         total_capacity: int,
         current_capacity: int,
     ) -> Dict[str, Any]:
+        discovered_nodes = [
+            self.build_discovered_node_info(node)
+            for node in self.get_discovered_node_payloads()
+        ]
         if self.scheduler is None:
             return {
-                "nodes": [],
+                "nodes": discovered_nodes,
                 "pipelines": [],
                 "edges": [],
                 "totals": {
@@ -190,7 +198,7 @@ class SchedulerManage:
                     "ready_pipelines": 0,
                     "total_capacity": 0,
                     "current_capacity": 0,
-                    "joined_nodes": 0,
+                    "joined_nodes": len(discovered_nodes),
                 },
             }
 
@@ -240,6 +248,11 @@ class SchedulerManage:
             )
             for node in node_manager.nodes
         ]
+        discovered_nodes = [
+            self.build_discovered_node_info(node)
+            for node in self.get_discovered_node_payloads(exclude_ids=set(node_lookup))
+        ]
+        nodes.extend(discovered_nodes)
 
         return {
             "nodes": nodes,
@@ -250,15 +263,71 @@ class SchedulerManage:
                 "ready_pipelines": sum(1 for pipeline in pipelines if pipeline["ready"]),
                 "total_capacity": int(total_capacity),
                 "current_capacity": int(current_capacity),
-                "joined_nodes": len(node_lookup),
+                "joined_nodes": len(nodes),
             },
         }
 
     def get_node_list(self):
         if self.scheduler is None:
-            return []
+            return [
+                self.build_discovered_node_info(node)
+                for node in self.get_discovered_node_payloads()
+            ]
 
-        return [self.build_node_info(node) for node in self.scheduler.node_manager.nodes]
+        node_ids = {node.node_id for node in self.scheduler.node_manager.nodes}
+        return [self.build_node_info(node) for node in self.scheduler.node_manager.nodes] + [
+            self.build_discovered_node_info(node)
+            for node in self.get_discovered_node_payloads(exclude_ids=node_ids)
+        ]
+
+    def register_discovered_node(self, node_payload: Dict[str, Any]):
+        node_id = self._extract_node_id(node_payload)
+        if not node_id:
+            return
+        self.discovered_nodes[node_id] = {
+            "payload": dict(node_payload),
+            "last_seen": time.time(),
+        }
+
+    def unregister_discovered_node(self, node_id: Optional[str]):
+        if not node_id:
+            return
+        self.discovered_nodes.pop(node_id, None)
+
+    def get_discovered_node_payloads(self, exclude_ids: Optional[set[str]] = None):
+        self._prune_discovered_nodes()
+        excluded = exclude_ids or set()
+        payloads: List[Dict[str, Any]] = []
+        for node_id, entry in self.discovered_nodes.items():
+            if node_id in excluded:
+                continue
+            payload = entry.get("payload")
+            if isinstance(payload, dict):
+                payloads.append(payload)
+        return payloads
+
+    def _prune_discovered_nodes(self):
+        cutoff = time.time() - self.discovered_node_ttl_seconds
+        stale_ids = [
+            node_id
+            for node_id, entry in self.discovered_nodes.items()
+            if entry.get("last_seen", 0) < cutoff
+        ]
+        for node_id in stale_ids:
+            self.discovered_nodes.pop(node_id, None)
+
+    def _extract_node_id(self, node_payload: Dict[str, Any]) -> Optional[str]:
+        if not isinstance(node_payload, dict):
+            return None
+        node_id = node_payload.get("node_id")
+        if isinstance(node_id, str) and node_id:
+            return node_id
+        hardware = node_payload.get("hardware")
+        if isinstance(hardware, dict):
+            hardware_node_id = hardware.get("node_id")
+            if isinstance(hardware_node_id, str) and hardware_node_id:
+                return hardware_node_id
+        return None
 
     def build_node_info(
         self,
@@ -290,6 +359,28 @@ class SchedulerManage:
             "layer_latency_ms": None if latency_ms == float("inf") else latency_ms,
         }
 
+    def build_discovered_node_info(self, node_payload: Dict[str, Any]):
+        hardware = node_payload.get("hardware", {})
+        if not isinstance(hardware, dict):
+            hardware = {}
+        return {
+            "node_id": self._extract_node_id(node_payload) or "",
+            "status": NODE_STATUS_WAITING,
+            "gpu_num": hardware.get("num_gpus", 0),
+            "gpu_name": hardware.get("gpu_name", ""),
+            "gpu_memory": hardware.get("memory_gb", 0),
+            "device": hardware.get("device", ""),
+            "start_layer": node_payload.get("start_layer"),
+            "end_layer": node_payload.get("end_layer"),
+            "current_requests": node_payload.get("current_requests", 0),
+            "max_requests": node_payload.get("max_concurrent_requests", 0),
+            "assigned_request_count": 0,
+            "pipeline_id": None,
+            "stage_index": None,
+            "is_active": bool(node_payload.get("is_active", False)),
+            "layer_latency_ms": node_payload.get("layer_latency_ms"),
+        }
+
     def _start_scheduler(self, model_name, init_nodes_num):
         """
         Create the scheduler and start its background run loop.
@@ -312,6 +403,8 @@ class SchedulerManage:
             enable_weight_refit=self.enable_weight_refit,
             weight_refit_mode=self.weight_refit_mode,
         )
+        if hasattr(self, "connection_handler") and self.connection_handler is not None:
+            self.connection_handler.scheduler = self.scheduler
 
         # Run the scheduler's event/dispatch loops in background so the process
         # can continue to serve RPCs and HTTP traffic.
@@ -355,6 +448,7 @@ class SchedulerManage:
         self.connection_handler = None
         self.network_signature = None
         self.stubs = {}
+        self.discovered_nodes = {}
 
     def _start_lattica(self, initial_peers: List[str], relay_servers: List[str]):
         """
@@ -381,8 +475,10 @@ class SchedulerManage:
                     lattica=self.lattica,
                     scheduler=self.scheduler,
                     http_port=self.http_port,
+                    scheduler_manage=self,
                 )
                 logger.debug("Created connection handler with existing Lattica")
+            self.connection_handler.scheduler_manage = self
             return
 
         logger.debug(
@@ -444,6 +540,7 @@ class SchedulerManage:
             lattica=self.lattica,
             scheduler=self.scheduler,
             http_port=self.http_port,
+            scheduler_manage=self,
         )
         logger.debug("RPCConnectionHandler initialized")
 

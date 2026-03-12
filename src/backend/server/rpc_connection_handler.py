@@ -24,11 +24,13 @@ class RPCConnectionHandler(ConnectionHandler):
         lattica: Lattica,
         scheduler: Scheduler,
         http_port: int,
+        scheduler_manage=None,
     ):
         # Initialize the base class
         super().__init__(lattica)
         self.scheduler = scheduler
         self.http_port = http_port
+        self.scheduler_manage = scheduler_manage
 
     @rpc_stream
     def node_join(self, message):
@@ -46,6 +48,8 @@ class RPCConnectionHandler(ConnectionHandler):
         #     "max_sequence_length": 1024,
         # }
         logger.info(f"receive node_join request: {message}")
+        if self.scheduler_manage is not None:
+            self.scheduler_manage.register_discovered_node(message)
         if self.scheduler is None:
             logger.warning("Received node_join before scheduler initialization completed")
             return {"pending": True, "reason": "scheduler_not_initialized"}
@@ -63,6 +67,15 @@ class RPCConnectionHandler(ConnectionHandler):
     @rpc_method
     def node_leave(self, message):
         logger.debug(f"receive node_leave request: {message}")
+        node_id = message.get("node_id")
+        if not node_id:
+            hardware = message.get("hardware", {})
+            if isinstance(hardware, dict):
+                node_id = hardware.get("node_id")
+        if self.scheduler_manage is not None:
+            self.scheduler_manage.unregister_discovered_node(node_id)
+        if self.scheduler is None:
+            return {}
         try:
             node = self.build_node(message)
             self.scheduler.enqueue_leave(node.node_id)
@@ -79,6 +92,8 @@ class RPCConnectionHandler(ConnectionHandler):
         second dict records weight refit information.
         """
         logger.debug(f"receive node_update request: {message}")
+        if self.scheduler_manage is not None:
+            self.scheduler_manage.register_discovered_node(message)
         if self.scheduler is None:
             return {"pending": True, "reason": "scheduler_not_initialized"}, {}
         try:
