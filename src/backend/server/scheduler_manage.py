@@ -1,3 +1,4 @@
+import copy
 import threading
 import time
 from typing import Any, Dict, List, Optional
@@ -58,6 +59,17 @@ class SchedulerManage:
         self.network_signature = None
         self.discovered_nodes: Dict[str, Dict[str, Any]] = {}
         self.discovered_node_ttl_seconds = 15.0
+        self.cluster_status_lock = threading.Lock()
+        self.cluster_status_last_error = ""
+        self.cluster_status_snapshot = self._empty_cluster_status_snapshot(
+            snapshot_stale=False
+        )
+        self.cluster_status_generated_at = time.time()
+        threading.Thread(
+            target=self._cluster_status_refresh_loop,
+            name="SchedulerClusterStatus",
+            daemon=True,
+        ).start()
 
     def run(self, model_name, init_nodes_num, is_local_network=True):
         """
@@ -151,27 +163,22 @@ class SchedulerManage:
         return self.scheduler.need_more_nodes() if self.scheduler else False
 
     def get_cluster_status(self):
-        per_pipeline_min, total_capacity, current_capacity = self._get_pipeline_capacity_report()
-        return {
-            "type": "cluster_status",
-            "data": {
-                "status": self.get_schedule_status(),
-                "model_name": self.model_name,
-                "init_nodes_num": self.init_nodes_num,
-                "initialized": self.is_initialized(),
-                "scheduler_peer_id": self.get_peer_id(),
-                "network_mode": self.get_network_mode(),
-                "node_join_command": get_node_join_command(
-                    self.get_peer_id(), self.is_local_network
-                ),
-                "node_list": self.get_node_list(),
-                "need_more_nodes": self.need_more_nodes(),
-                "max_running_request": total_capacity,
-                "topology": self.get_topology_snapshot(
-                    per_pipeline_min, total_capacity, current_capacity
-                ),
-            },
-        }
+        with self.cluster_status_lock:
+            snapshot = copy.deepcopy(self.cluster_status_snapshot)
+            generated_at = self.cluster_status_generated_at
+            last_error = self.cluster_status_last_error
+
+        stale = (time.time() - generated_at) > 3.0
+        data = snapshot.get("data", {})
+        topology = data.get("topology", {})
+        totals = topology.get("totals", {})
+        if isinstance(totals, dict):
+            totals["snapshot_stale"] = stale
+            totals["snapshot_generated_at"] = time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time.gmtime(generated_at)
+            )
+        data["last_snapshot_error"] = last_error
+        return snapshot
 
     def _get_pipeline_capacity_report(self):
         if self.scheduler is None:
@@ -188,6 +195,9 @@ class SchedulerManage:
             self.build_discovered_node_info(node)
             for node in self.get_discovered_node_payloads()
         ]
+        discovered_memory_gb = sum(
+            self._node_memory_gb(node) for node in discovered_nodes
+        )
         if self.scheduler is None:
             return {
                 "nodes": discovered_nodes,
@@ -199,6 +209,10 @@ class SchedulerManage:
                     "total_capacity": 0,
                     "current_capacity": 0,
                     "joined_nodes": len(discovered_nodes),
+                    "discovered_workers": len(discovered_nodes),
+                    "registered_workers": 0,
+                    "discovered_memory_gb": discovered_memory_gb,
+                    "registered_memory_gb": 0,
                 },
             }
 
@@ -248,10 +262,14 @@ class SchedulerManage:
             )
             for node in node_manager.nodes
         ]
+        registered_memory_gb = sum(self._node_memory_gb(node) for node in nodes)
         discovered_nodes = [
             self.build_discovered_node_info(node)
             for node in self.get_discovered_node_payloads(exclude_ids=set(node_lookup))
         ]
+        discovered_memory_gb = sum(
+            self._node_memory_gb(node) for node in discovered_nodes
+        )
         nodes.extend(discovered_nodes)
 
         return {
@@ -264,6 +282,10 @@ class SchedulerManage:
                 "total_capacity": int(total_capacity),
                 "current_capacity": int(current_capacity),
                 "joined_nodes": len(nodes),
+                "discovered_workers": len(discovered_nodes),
+                "registered_workers": len(node_manager.nodes),
+                "discovered_memory_gb": discovered_memory_gb,
+                "registered_memory_gb": registered_memory_gb,
             },
         }
 
@@ -340,6 +362,7 @@ class SchedulerManage:
         return {
             "node_id": node.node_id,
             "status": NODE_STATUS_AVAILABLE if node.is_active else NODE_STATUS_WAITING,
+            "source": "registered",
             "gpu_num": node.hardware.num_gpus,
             "gpu_name": node.hardware.gpu_name,
             "gpu_memory": node.hardware.memory_gb,
@@ -366,6 +389,7 @@ class SchedulerManage:
         return {
             "node_id": self._extract_node_id(node_payload) or "",
             "status": NODE_STATUS_WAITING,
+            "source": "discovered",
             "gpu_num": hardware.get("num_gpus", 0),
             "gpu_name": hardware.get("gpu_name", ""),
             "gpu_memory": hardware.get("memory_gb", 0),
@@ -380,6 +404,97 @@ class SchedulerManage:
             "is_active": bool(node_payload.get("is_active", False)),
             "layer_latency_ms": node_payload.get("layer_latency_ms"),
         }
+
+    def _node_memory_gb(self, node_info: Dict[str, Any]) -> float:
+        gpu_num = node_info.get("gpu_num", 0) or 0
+        gpu_memory = node_info.get("gpu_memory", 0) or 0
+        try:
+            return max(float(gpu_num), 0.0) * max(float(gpu_memory), 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _empty_cluster_status_snapshot(self, snapshot_stale: bool) -> Dict[str, Any]:
+        generated_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        return {
+            "type": "cluster_status",
+            "data": {
+                "status": NODE_STATUS_WAITING,
+                "model_name": self.model_name,
+                "init_nodes_num": self.init_nodes_num,
+                "initialized": self.is_initialized(),
+                "scheduler_peer_id": self.get_peer_id(),
+                "network_mode": self.get_network_mode(),
+                "node_join_command": get_node_join_command(
+                    self.get_peer_id(), self.is_local_network
+                ),
+                "node_list": [],
+                "need_more_nodes": False,
+                "max_running_request": 0,
+                "last_snapshot_error": self.cluster_status_last_error,
+                "topology": {
+                    "nodes": [],
+                    "pipelines": [],
+                    "edges": [],
+                    "totals": {
+                        "registered_pipelines": 0,
+                        "ready_pipelines": 0,
+                        "total_capacity": 0,
+                        "current_capacity": 0,
+                        "joined_nodes": 0,
+                        "discovered_workers": 0,
+                        "registered_workers": 0,
+                        "discovered_memory_gb": 0,
+                        "registered_memory_gb": 0,
+                        "snapshot_generated_at": generated_at,
+                        "snapshot_stale": snapshot_stale,
+                    },
+                },
+            },
+        }
+
+    def _build_cluster_status_snapshot(self) -> Dict[str, Any]:
+        per_pipeline_min, total_capacity, current_capacity = (
+            self._get_pipeline_capacity_report()
+        )
+        return {
+            "type": "cluster_status",
+            "data": {
+                "status": self.get_schedule_status(),
+                "model_name": self.model_name,
+                "init_nodes_num": self.init_nodes_num,
+                "initialized": self.is_initialized(),
+                "scheduler_peer_id": self.get_peer_id(),
+                "network_mode": self.get_network_mode(),
+                "node_join_command": get_node_join_command(
+                    self.get_peer_id(), self.is_local_network
+                ),
+                "node_list": self.get_node_list(),
+                "need_more_nodes": self.need_more_nodes(),
+                "max_running_request": total_capacity,
+                "last_snapshot_error": "",
+                "topology": self.get_topology_snapshot(
+                    per_pipeline_min, total_capacity, current_capacity
+                ),
+            },
+        }
+
+    def _cluster_status_refresh_loop(self):
+        while True:
+            try:
+                snapshot = self._build_cluster_status_snapshot()
+                with self.cluster_status_lock:
+                    self.cluster_status_snapshot = snapshot
+                    self.cluster_status_generated_at = time.time()
+                    self.cluster_status_last_error = ""
+            except Exception as error:
+                logger.warning(f"Failed to refresh cached cluster status: {error}")
+                with self.cluster_status_lock:
+                    self.cluster_status_last_error = str(error)
+                    if not self.cluster_status_snapshot:
+                        self.cluster_status_snapshot = self._empty_cluster_status_snapshot(
+                            snapshot_stale=True
+                        )
+            time.sleep(1)
 
     def _start_scheduler(self, model_name, init_nodes_num):
         """
