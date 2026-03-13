@@ -118,7 +118,12 @@ async def scheduler_init(raw_request: Request):
         logger.info(
             f"Initializing scheduler with model: {model_name}, init_nodes_num: {init_nodes_num}"
         )
-        scheduler_manage.run(model_name, init_nodes_num, is_local_network)
+        # `scheduler_manage.run()` performs synchronous Lattica registration that can
+        # block for seconds. Run it off the event loop so status/model endpoints stay
+        # responsive during allocation and downloads.
+        await asyncio.to_thread(
+            scheduler_manage.run, model_name, init_nodes_num, is_local_network
+        )
 
         return JSONResponse(
             content={
@@ -144,7 +149,9 @@ async def scheduler_bootstrap(raw_request: Request):
     is_local_network = request_data.get("is_local_network", True)
 
     try:
-        scheduler_manage.bootstrap_network(is_local_network)
+        # `bootstrap_network()` can block while the local P2P node advertises and
+        # registers services. Keep the HTTP event loop free so probes can continue.
+        await asyncio.to_thread(scheduler_manage.bootstrap_network, is_local_network)
         return JSONResponse(
             content={
                 "type": "scheduler_bootstrap",

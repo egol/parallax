@@ -130,6 +130,24 @@ def _test_gap_patch_rebalance(allocator: BaseLayerAllocator):
     assert restored_mem == before_mem
 
 
+def test_deallocate_tolerates_node_already_in_standby():
+    model = build_model_info(4)
+    node = _build_node("a100-80g", model, id_suffix="-standby")
+    node_management = build_node_management([node])
+    allocator = GreedyLayerAllocator(
+        model_info=model, node_management=node_management, trim_layers_on_turning_points=False
+    )
+
+    allocator.allocate_from_standby()
+    assert node_management.state_of(node.node_id) == NodeState.ACTIVE
+
+    node_management.ensure_standby([node.node_id])
+    allocator.deallocate(node)
+
+    assert node_management.state_of(node.node_id) == NodeState.STANDBY
+    assert node.start_layer is None and node.end_layer is None
+
+
 @pytest.mark.parametrize(
     "num_layers,counts,expected_ranges,strategy",
     [

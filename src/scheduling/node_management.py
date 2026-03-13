@@ -174,7 +174,11 @@ class Pipeline:
             for nid in pipeline_node_ids:
                 node_manager._node_to_pipeline.pop(nid, None)
             if remaining:
-                nodes_to_clear = node_manager._standby_locked(remaining, allow_missing=True)
+                nodes_to_clear = node_manager._standby_locked(
+                    remaining,
+                    allow_missing=True,
+                    allow_already_standby=True,
+                )
 
         for node in nodes_to_clear:
             node.clear_serving_state()
@@ -217,6 +221,7 @@ class NodeManager:
         node_ids: List[str],
         *,
         allow_missing: bool = False,
+        allow_already_standby: bool = False,
     ) -> List[Node]:
         """Transition nodes to STANDBY under the registry lock.
 
@@ -232,6 +237,10 @@ class NodeManager:
                 raise ValueError(f"Node {nid} not found in registry")
 
             prev_state = self._state.get(nid)
+            if prev_state == NodeState.STANDBY and allow_already_standby:
+                nodes_to_clear.append(node)
+                self.node_assigned_request_count.pop(nid, None)
+                continue
             if prev_state is not None and prev_state != NodeState.ACTIVE:
                 raise ValueError(f"Node {nid} is not ACTIVE, current state: {prev_state}")
 
@@ -292,6 +301,27 @@ class NodeManager:
         # Do per-node work outside the registry lock to reduce contention.
         for node in nodes_to_clear:
             # TODO: Remove Runtime KV Cache
+            node.clear_serving_state()
+
+    def ensure_standby(
+        self,
+        node_ids: List[str],
+        *,
+        allow_missing: bool = False,
+    ) -> None:
+        """Best-effort teardown path that leaves listed nodes in STANDBY.
+
+        Unlike `standby()`, this tolerates members that are already standby so
+        rebalance, pipeline-detach, and deallocation paths stay idempotent.
+        """
+        with self._lock:
+            nodes_to_clear = self._standby_locked(
+                node_ids,
+                allow_missing=allow_missing,
+                allow_already_standby=True,
+            )
+
+        for node in nodes_to_clear:
             node.clear_serving_state()
 
     def ids_to_nodes(self, node_ids: List[str]) -> List[Node]:
@@ -455,7 +485,7 @@ class NodeManager:
 
     def clear_registered_pipelines(self) -> None:
         """Clear any fixed pipeline registrations and detach member nodes."""
-        self.standby(list(self._node_to_pipeline.keys()))
+        self.ensure_standby(list(self._node_to_pipeline.keys()))
         with self._lock:
             self._registered_pipelines = {}
             self._node_to_pipeline = {}

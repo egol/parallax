@@ -140,3 +140,35 @@ def test_remove_detaches_pipeline_and_clears_remaining_members():
     assert reg.pipeline_id_of_node(b.node_id) is None
     assert reg.state_of(b.node_id) == NodeState.STANDBY
     assert b.start_layer is None and b.end_layer is None
+
+
+def test_ensure_standby_is_idempotent_for_already_standby_nodes():
+    model = build_model_info(4)
+    node = build_node("node", model, mem_gb=80.0)
+    node.set_layer_allocation(0, 4)
+
+    reg = NodeManager(initial_nodes=[node])
+    reg.ensure_standby([node.node_id])
+    reg.ensure_standby([node.node_id])
+
+    assert reg.state_of(node.node_id) == NodeState.STANDBY
+    assert node.start_layer is None and node.end_layer is None
+
+
+def test_clear_registered_pipelines_tolerates_members_already_in_standby():
+    model = build_model_info(4)
+    a = build_node("a", model, mem_gb=80.0)
+    b = build_node("b", model, mem_gb=80.0)
+    a.set_layer_allocation(0, 2)
+    b.set_layer_allocation(2, 4)
+
+    reg = NodeManager(initial_nodes=[a, b])
+    reg.activate([a.node_id, b.node_id])
+    reg.register_pipelines([[a.node_id, b.node_id]])
+
+    reg.ensure_standby([a.node_id, b.node_id])
+    reg.clear_registered_pipelines()
+
+    assert reg.get_registered_pipeline_node_ids() == {}
+    assert reg.state_of(a.node_id) == NodeState.STANDBY
+    assert reg.state_of(b.node_id) == NodeState.STANDBY

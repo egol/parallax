@@ -181,7 +181,7 @@ class BaseLayerAllocator:
         for layer_id in range(start_layer, end_layer):
             if layer_id in self.layer_to_load:
                 self.layer_to_load[layer_id].remove_node(node)
-        self.node_management.standby([node.node_id])
+        self.node_management.ensure_standby([node.node_id], allow_missing=True)
         self._update_layer_loads_heap()
 
     def reallocate(self, node: Node, start_layer: int, end_layer: int) -> None:
