@@ -85,14 +85,14 @@ def selective_model_download(
         logger.debug(f"Using local model path: {model_path}")
         is_remote = False
     else:
-        logger.debug(f"Downloading model metadata for {repo_id}")
+        logger.info(f"Resolving model metadata for {repo_id}")
         model_path = download_metadata_only(
             repo_id=repo_id,
             cache_dir=cache_dir,
             force_download=force_download,
             local_files_only=local_files_only,
         )
-        logger.debug(f"Downloaded model metadata to {model_path}")
+        logger.info(f"Resolved model metadata for {repo_id}")
         is_remote = True
 
     if start_layer is not None and end_layer is not None:
@@ -106,27 +106,35 @@ def selective_model_download(
 
         if is_remote:
             if not needed_weight_files:
-                logger.debug("Could not determine specific weight files, downloading all")
+                logger.info(
+                    "Could not determine specific weight files for layers "
+                    f"[{start_layer}, {end_layer}); downloading full model snapshot"
+                )
+                logger.info("Downloading full model snapshot")
                 snapshot_download(
                     repo_id=repo_id,
                     cache_dir=cache_dir,
                     force_download=force_download,
                     local_files_only=local_files_only,
                 )
+                logger.info("Downloaded full model snapshot")
             else:
                 # Step 3: Download only the needed weight files
                 logger.info(f"Downloading {len(needed_weight_files)} weight files")
 
-                for weight_file in needed_weight_files:
+                total_weight_files = len(needed_weight_files)
+                for index, weight_file in enumerate(needed_weight_files, start=1):
                     # Check if file already exists in local cache before downloading
                     weight_file_path = model_path / weight_file
                     if weight_file_path.exists():
-                        logger.debug(
-                            f"Weight file {weight_file} already exists locally, skipping download"
+                        logger.info(
+                            f"Downloaded weight file {index}/{total_weight_files}: {weight_file}"
                         )
                         continue
 
-                    logger.debug(f"Downloading {weight_file}")
+                    logger.info(
+                        f"Downloading weight file {index}/{total_weight_files}: {weight_file}"
+                    )
                     try:
                         hf_hub_download(
                             repo_id=repo_id,
@@ -142,6 +150,9 @@ def selective_model_download(
                             "Please check network connectivity or pre-download the model."
                         )
                         raise
+                    logger.info(
+                        f"Downloaded weight file {index}/{total_weight_files}: {weight_file}"
+                    )
 
                 logger.debug(f"Downloaded weight files for layers [{start_layer}, {end_layer})")
         else:
@@ -150,13 +161,14 @@ def selective_model_download(
     else:
         # No layer range specified
         if is_remote:
-            logger.debug("No layer range specified, downloading all model files")
+            logger.info("Downloading full model snapshot")
             snapshot_download(
                 repo_id=repo_id,
                 cache_dir=cache_dir,
                 force_download=force_download,
                 local_files_only=local_files_only,
             )
+            logger.info("Downloaded full model snapshot")
         else:
             logger.debug("No layer range specified and using local path; nothing to download")
 

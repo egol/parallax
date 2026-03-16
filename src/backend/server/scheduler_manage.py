@@ -54,6 +54,7 @@ class SchedulerManage:
         self.scheduler = None
         self.node_id = f"{dht_prefix}_announce"
         self.lattica = None
+        self.completion_handler = None
         self.stubs = {}
         self.is_local_network = False
         self.network_signature = None
@@ -82,13 +83,7 @@ class SchedulerManage:
         )
         self.bootstrap_network(is_local_network)
         self._start_scheduler(model_name, init_nodes_num)
-        self.completion_handler = TransformerConnectionHandler(
-            lattica=self.lattica,
-            recv_from_peer_addr="",
-            send_to_peer_addr="",
-            block_start_index=0,
-            block_end_index=1,
-        )
+        self._ensure_completion_handler()
 
     def bootstrap_network(self, is_local_network=True):
         """
@@ -561,9 +556,31 @@ class SchedulerManage:
             logger.warning(f"Failed to close Lattica cleanly: {e}")
         self.lattica = None
         self.connection_handler = None
+        self.completion_handler = None
         self.network_signature = None
         self.stubs = {}
         self.discovered_nodes = {}
+
+    def _ensure_completion_handler(self):
+        """
+        Register the scheduler-side completion RPC service only once per Lattica node.
+
+        Re-registering a new TransformerConnectionHandler on every model init can wedge the
+        Python process in Lattica service registration and stall the HTTP API.
+        """
+        if self.lattica is None:
+            return
+        if self.completion_handler is not None:
+            logger.debug("Reusing existing TransformerConnectionHandler")
+            return
+        logger.debug("Registering TransformerConnectionHandler on scheduler Lattica node")
+        self.completion_handler = TransformerConnectionHandler(
+            lattica=self.lattica,
+            recv_from_peer_addr="",
+            send_to_peer_addr="",
+            block_start_index=0,
+            block_end_index=1,
+        )
 
     def _start_lattica(self, initial_peers: List[str], relay_servers: List[str]):
         """
