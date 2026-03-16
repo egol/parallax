@@ -1,0 +1,11 @@
+{
+  "architectures": ["ParallaxSmokeForCausalLM"],
+  "model_type": "parallax-smoke",
+  "hidden_size": 512,
+  "intermediate_size": 1360,
+  "num_attention_heads": 8,
+  "num_key_value_heads": 8,
+  "num_hidden_layers": 4,
+  "head_dim": 64,
+  "vocab_size": 32768
+}

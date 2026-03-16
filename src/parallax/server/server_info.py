@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 ServerInfo that will be announce to DHT and used for client's routing.
     HardwareInfo: Detects and summarizes hardware information, RAM and FLOPs
@@ -8,11 +10,6 @@ import platform
 import subprocess
 from dataclasses import asdict, dataclass
 from typing import Any, ClassVar, Dict, Optional
-
-import mlx.core as mx
-from mlx import nn
-from mlx.utils import tree_reduce
-from mlx_lm.tuner.utils import get_total_parameters
 
 try:
     import torch
@@ -248,13 +245,17 @@ class ShardedModelInfo:
 
     @classmethod
     def from_sharded_model(
-        cls, sharded_model_instance: nn.Module  # Instance of your ShardedModel
+        cls, sharded_model_instance: Any
     ) -> "ShardedModelInfo":
         """
         Constructs ShardedModelInfo from a loaded ShardedModel instance.
         Assumes sharded_model_instance has start_layer, end_layer, and model_id_original attributes.
         """
         # Calculate parameter count
+        import mlx.core as mx
+        from mlx.utils import tree_reduce
+        from mlx_lm.tuner.utils import get_total_parameters
+
         count = get_total_parameters(sharded_model_instance)
 
         model_bytes = tree_reduce(

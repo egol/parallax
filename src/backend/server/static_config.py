@@ -144,6 +144,13 @@ def get_model_info(model_name, use_hfcache: bool = False):
             mlx_param_bytes_per_element = mlx_quant_dict["bits"] / 8
 
     # get local experts
+    hidden_dim = config.get("hidden_size", config.get("n_embd", 0))
+    num_attention_heads = config.get("num_attention_heads", config.get("n_head", 0))
+    num_layers = config.get("num_hidden_layers", config.get("n_layer", 0))
+    intermediate_dim = config.get("intermediate_size", config.get("n_inner", None))
+    if intermediate_dim is None and hidden_dim:
+        intermediate_dim = hidden_dim * 4
+
     num_local_experts = config.get("num_local_experts", None)
     if num_local_experts is None:
         num_local_experts = config.get("num_experts", None)
@@ -153,19 +160,26 @@ def get_model_info(model_name, use_hfcache: bool = False):
     num_kv_heads = config.get("num_key_value_heads", None)
     if num_kv_heads is None:
         num_kv_heads = config.get("num_attention_groups", None)
+    if num_kv_heads is None:
+        num_kv_heads = config.get("n_head_kv", None)
+    if num_kv_heads is None:
+        num_kv_heads = num_attention_heads
 
     model_info = ModelInfo(
         model_name=model_name,
         mlx_model_name=mlx_model_name,
-        head_size=config.get("head_dim", 128),
+        head_size=config.get(
+            "head_dim",
+            hidden_dim // num_attention_heads if hidden_dim and num_attention_heads else 128,
+        ),
         qk_nope_head_dim=config.get("qk_nope_head_dim", None),
         qk_rope_head_dim=config.get("qk_rope_head_dim", None),
-        hidden_dim=config.get("hidden_size", 0),
-        intermediate_dim=config.get("intermediate_size", 0),
-        num_attention_heads=config.get("num_attention_heads", 0),
+        hidden_dim=hidden_dim,
+        intermediate_dim=intermediate_dim or 0,
+        num_attention_heads=num_attention_heads,
         num_kv_heads=num_kv_heads or 0,
         vocab_size=config.get("vocab_size", 0),
-        num_layers=config.get("num_hidden_layers", 0),
+        num_layers=num_layers,
         ffn_num_projections=3,
         param_bytes_per_element=param_bytes_per_element,
         mlx_param_bytes_per_element=mlx_param_bytes_per_element,

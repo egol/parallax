@@ -28,13 +28,6 @@ from parallax.p2p.utils import AsyncWorker
 from parallax.server.server_info import detect_node_hardware
 from parallax.utils.shared_state import SharedState
 from parallax.utils.utils import get_zmq_socket
-from parallax.utils.weight_refit_utils import (
-    calculate_cid_manual,
-    concat_weight_partition,
-    filer_weight_cid_list,
-    parse_safetensors_from_memory,
-    release_disk_storage,
-)
 from parallax_utils.logging_config import get_logger, set_log_level
 
 logger = get_logger(__name__)
@@ -217,6 +210,13 @@ def check_and_run_weight_refit(gradient_server, message):
         cid:        List[str],  cid list.
         index_map:  Dict[str],  key(weight_name): value(cid)
     """
+    from parallax.utils.weight_refit_utils import (
+        calculate_cid_manual,
+        concat_weight_partition,
+        filer_weight_cid_list,
+        parse_safetensors_from_memory,
+        release_disk_storage,
+    )
 
     def _download_weight_thread(cid):
         raw_data = None
@@ -337,18 +337,18 @@ class GradientServer:
         self,
         recv_from_peer_addr: str,
         send_to_peer_addr: str,
-        initial_peers: List[str] = [],
+        initial_peers: Optional[List[str]] = None,
         scheduler_addr: Optional[str] = None,
-        relay_servers: List[str] = [],
+        relay_servers: Optional[List[str]] = None,
         block_start_index: int = 0,
         block_end_index: int = 1,
         hidden_layers: int = 128,
         tp_size: int = 1,
         dp_size: int = 1,
         dht_prefix: str = "gradient",
-        host_maddrs: List[str] = [],
+        host_maddrs: Optional[List[str]] = None,
         http_port: Optional[int] = None,
-        announce_maddrs: List[str] = [],
+        announce_maddrs: Optional[List[str]] = None,
         notify_url: str = None,
         model_name: Optional[str] = None,
         max_batch_size: Optional[int] = None,
@@ -359,17 +359,17 @@ class GradientServer:
     ):
         self.recv_from_peer_addr = recv_from_peer_addr
         self.send_to_peer_addr = send_to_peer_addr
-        self.initial_peers = initial_peers
+        self.initial_peers = list(initial_peers or [])
         self.scheduler_addr = scheduler_addr
-        self.relay_servers = relay_servers
+        self.relay_servers = list(relay_servers or [])
         self.block_start_index = block_start_index
         self.block_end_index = block_end_index
         self.hidden_layers = hidden_layers
         self.tp_size = tp_size
         self.dp_size = dp_size
         self.dht_prefix = dht_prefix
-        self.host_maddrs = host_maddrs
-        self.announce_maddrs = announce_maddrs
+        self.host_maddrs = list(host_maddrs or [])
+        self.announce_maddrs = list(announce_maddrs or [])
         self.http_port = http_port
         self.notify_url = notify_url
         self.model_name = model_name
@@ -404,6 +404,8 @@ class GradientServer:
         logger.debug(f"manual_layer_assignment: {self.manual_layer_assignment}")
         self._layer_allocation_changed = False
         self._shared_state = None  # Will be set if running in subprocess mode
+        self._max_build_attempts = 3
+        self._max_join_attempts = 3
 
     def _sync_to_shared_state(self):
         """Sync current layer allocation and status to shared state if available"""
@@ -433,14 +435,68 @@ class GradientServer:
             else:
                 logger.warning(f"Folder '{weight_dir}' does not exist.")
 
+    @staticmethod
+    def _parse_scheduler_target(scheduler_addr: Optional[str]) -> tuple[List[str], Optional[str]]:
+        if scheduler_addr is None or scheduler_addr == "auto":
+            return [], None
+
+        normalized = scheduler_addr.strip()
+        if not normalized:
+            raise ValueError("scheduler_addr must not be empty")
+
+        if normalized.startswith("/"):
+            normalized = normalized.rstrip("/")
+            parts = [part for part in normalized.split("/") if part]
+            if len(parts) < 2 or parts[-2] != "p2p" or not parts[-1]:
+                raise ValueError(
+                    "scheduler_addr multiaddr must end with /p2p/<scheduler-peer-id>"
+                )
+            return [normalized], parts[-1]
+
+        if "/" in normalized:
+            raise ValueError("scheduler_addr must be a bare peer id or /p2p multiaddr")
+        return [], normalized
+
+    def _close_lattica(self):
+        if self.lattica is not None:
+            try:
+                self.lattica.close()
+            except Exception:
+                logger.debug("Failed to close Lattica cleanly", exc_info=True)
+            finally:
+                self.lattica = None
+                self.scheduler_stub = None
+
+    def _build_lattica_with_retry(self):
+        last_error = None
+        for attempt in range(1, self._max_build_attempts + 1):
+            if self.build_lattica():
+                logger.info("Lattica built successfully")
+                return
+            last_error = RuntimeError("Failed to build Lattica")
+            if attempt == self._max_build_attempts:
+                break
+            logger.error(
+                f"Failed to build lattica, waiting for 10 seconds before retry {attempt + 1}/{self._max_build_attempts}"
+            )
+            time.sleep(10)
+        raise last_error
+
     def build_lattica(self):
         self.lattica = Lattica.builder().with_listen_addrs(self.host_maddrs)
 
-        if self.scheduler_addr is not None and self.scheduler_addr != "auto":
-            if self.scheduler_addr.startswith("/"):
-                logger.info(f"Using scheduler addr: {self.scheduler_addr}")
-                self.lattica.with_bootstraps([self.scheduler_addr])
-            self.scheduler_peer_id = self.scheduler_addr.split("/")[-1]
+        try:
+            scheduler_bootstraps, self.scheduler_peer_id = self._parse_scheduler_target(
+                self.scheduler_addr
+            )
+        except ValueError as exc:
+            logger.error(f"Invalid scheduler target {self.scheduler_addr!r}: {exc}")
+            self._close_lattica()
+            return False
+
+        if scheduler_bootstraps:
+            logger.info(f"Using scheduler addr: {scheduler_bootstraps[0]}")
+            self.lattica.with_bootstraps(scheduler_bootstraps)
 
         if len(self.relay_servers) > 0:
             logger.info(f"Using relay servers: {self.relay_servers}")
@@ -468,7 +524,8 @@ class GradientServer:
                     logger.error(
                         "Your network NAT type is symmetric, relay does not work on this type of NAT, see https://en.wikipedia.org/wiki/Network_address_translation"
                     )
-                    exit(1)
+                    self._close_lattica()
+                    return False
             except Exception as e:
                 logger.exception(f"Error in is symmetric NAT: {e}")
 
@@ -489,72 +546,73 @@ class GradientServer:
                     logger.warning(f"Failed to get scheduler addr: {e}, waiting for 3 seconds.")
             if self.scheduler_peer_id is None:
                 logger.error("Failed to get scheduler peer id")
+                self._close_lattica()
                 return False
 
         return True
 
     def run(self):
-        if self.build_lattica():
-            logger.info("Lattica built successfully")
-        else:
-            logger.error("Failed to build lattica")
-            exit(1)
+        self._build_lattica_with_retry()
 
         if self.scheduler_addr is not None:  # central scheduler mode
-            try:
-                self.scheduler_stub = RPCConnectionHandler(self.lattica, None, None).get_stub(
-                    self.scheduler_peer_id
-                )
-                node_info = self.get_node_info()
-                if node_info == {}:
-                    logger.error("Failed to get node info, try again after 10 seconds")
-                    self.lattica.close()
-                    self.lattica = None
-                    time.sleep(10)
-                    return self.run()
+            last_error = None
+            for attempt in range(1, self._max_join_attempts + 1):
+                try:
+                    self.scheduler_stub = RPCConnectionHandler(self.lattica, None, None).get_stub(
+                        self.scheduler_peer_id
+                    )
+                    node_info = self.get_node_info()
+                    if node_info == {}:
+                        raise RuntimeError("Failed to get node info from the scheduler network")
 
-                if self.manual_layer_assignment:
-                    node_info["manual_layer_assignment"] = True
+                    if self.manual_layer_assignment:
+                        node_info["manual_layer_assignment"] = True
 
-                while True:
-                    response = self.scheduler_stub.node_join(node_info)
-                    response = response.result(timeout=300)
-                    if response.get("pending"):
-                        logger.info(
-                            "Scheduler peer is reachable but no model is initialized yet, retrying node_join in 2 seconds"
-                        )
-                        time.sleep(2)
-                        node_info = self.get_node_info()
-                        if node_info == {}:
-                            logger.error("Failed to refresh node info, try again after 10 seconds")
-                            self.lattica.close()
-                            self.lattica = None
-                            time.sleep(10)
-                            return self.run()
-                        if self.manual_layer_assignment:
-                            node_info["manual_layer_assignment"] = True
-                        continue
-                    if response == {}:
-                        logger.error("Failed to join scheduler")
-                        exit(1)
+                    while True:
+                        response = self.scheduler_stub.node_join(node_info)
+                        response = response.result(timeout=300)
+                        if response.get("pending"):
+                            logger.info(
+                                "Scheduler peer is reachable but no model is initialized yet, retrying node_join in 2 seconds"
+                            )
+                            time.sleep(2)
+                            node_info = self.get_node_info()
+                            if node_info == {}:
+                                raise RuntimeError(
+                                    "Failed to refresh node info from the scheduler network"
+                                )
+                            if self.manual_layer_assignment:
+                                node_info["manual_layer_assignment"] = True
+                            continue
+                        if response == {}:
+                            raise RuntimeError("Failed to join scheduler")
+                        break
+
+                    logger.info(f"Join scheduler response: {response}")
+
+                    if not self.manual_layer_assignment:
+                        self.block_start_index = response.get("start_layer")
+                        self.block_end_index = response.get("end_layer")
+                    self.model_name = response.get("model_name")
+                    self.tp_size = response.get("tp_size")
+                    self.enable_weight_refit = response.get("enable_weight_refit")
+                    self.weight_refit_mode = response.get("weight_refit_mode")
+
+                    # Sync to shared state if available
+                    self._sync_to_shared_state()
                     break
-
-                logger.info(f"Join scheduler response: {response}")
-
-                if not self.manual_layer_assignment:
-                    self.block_start_index = response.get("start_layer")
-                    self.block_end_index = response.get("end_layer")
-                self.model_name = response.get("model_name")
-                self.tp_size = response.get("tp_size")
-                self.enable_weight_refit = response.get("enable_weight_refit")
-                self.weight_refit_mode = response.get("weight_refit_mode")
-
-                # Sync to shared state if available
-                self._sync_to_shared_state()
-
-            except Exception as e:
-                logger.exception(f"Error in join scheduler: {e}")
-                exit(1)
+                except Exception as e:
+                    last_error = e
+                    logger.exception(
+                        f"Error in join scheduler (attempt {attempt}/{self._max_join_attempts}): {e}"
+                    )
+                    self._close_lattica()
+                    if attempt == self._max_join_attempts:
+                        raise RuntimeError("Failed to join scheduler after retries") from e
+                    time.sleep(10)
+                    self._build_lattica_with_retry()
+            if last_error is not None and self.scheduler_stub is None:
+                raise RuntimeError("Failed to initialize scheduler connection") from last_error
         else:  # no scheduler mode
             self.start_routing_table_updater()  # thread
 

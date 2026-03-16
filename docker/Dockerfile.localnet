@@ -1,0 +1,21 @@
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1
+ENV PIP_NO_CACHE_DIR=1
+ENV PARALLAX_TEST_MODE=1
+ENV SGLANG_ENABLE_JIT_DEEPGEMM=0
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /parallax
+
+COPY README.md ./README.md
+COPY pyproject.toml ./pyproject.toml
+COPY src ./src
+COPY docker/test-models ./docker/test-models
+
+RUN pip install --upgrade pip setuptools wheel \
+    && pip install torch \
+    && pip install -e .

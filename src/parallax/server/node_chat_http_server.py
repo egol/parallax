@@ -1,7 +1,7 @@
 import asyncio
 import json
 import time
-from typing import Dict
+from typing import Dict, List, Optional
 
 import fastapi
 import uvicorn
@@ -97,21 +97,62 @@ class NodeChatHttpServer:
         self.relay_servers = args.relay_servers
         self.announce_maddrs = args.announce_maddrs
         self.initial_peers = args.initial_peers
-        self.host_maddrs = (
-            [f"/ip4/0.0.0.0/tcp/{self.tcp_port}", f"/ip4/0.0.0.0/udp/{self.udp_port}/quic-v1"],
-        )
+        self.host_maddrs = [
+            f"/ip4/0.0.0.0/tcp/{self.tcp_port}",
+            f"/ip4/0.0.0.0/udp/{self.udp_port}/quic-v1",
+        ]
         self.scheduler_peer_id = None
         self.scheduler_stub = None
         self.lattica = None
+        self._max_build_attempts = 3
+
+    @staticmethod
+    def _parse_scheduler_target(scheduler_addr: Optional[str]) -> tuple[List[str], Optional[str]]:
+        if scheduler_addr is None or scheduler_addr == "auto":
+            return [], None
+
+        normalized = scheduler_addr.strip()
+        if not normalized:
+            raise ValueError("scheduler_addr must not be empty")
+
+        if normalized.startswith("/"):
+            normalized = normalized.rstrip("/")
+            parts = [part for part in normalized.split("/") if part]
+            if len(parts) < 2 or parts[-2] != "p2p" or not parts[-1]:
+                raise ValueError(
+                    "scheduler_addr multiaddr must end with /p2p/<scheduler-peer-id>"
+                )
+            return [normalized], parts[-1]
+
+        if "/" in normalized:
+            raise ValueError("scheduler_addr must be a bare peer id or /p2p multiaddr")
+        return [], normalized
+
+    def _close_lattica(self):
+        if self.lattica is not None:
+            try:
+                self.lattica.close()
+            except Exception:
+                logger.debug("Failed to close Lattica cleanly", exc_info=True)
+            finally:
+                self.lattica = None
+                self.scheduler_stub = None
 
     def build_lattica(self):
         self.lattica = Lattica.builder().with_listen_addrs(self.host_maddrs)
 
-        if self.scheduler_addr is not None and self.scheduler_addr != "auto":
-            if self.scheduler_addr.startswith("/"):
-                logger.info(f"Using scheduler addr: {self.scheduler_addr}")
-                self.lattica.with_bootstraps([self.scheduler_addr])
-            self.scheduler_peer_id = self.scheduler_addr.split("/")[-1]
+        try:
+            scheduler_bootstraps, self.scheduler_peer_id = self._parse_scheduler_target(
+                self.scheduler_addr
+            )
+        except ValueError as exc:
+            logger.error(f"Invalid scheduler target {self.scheduler_addr!r}: {exc}")
+            self._close_lattica()
+            return False
+
+        if scheduler_bootstraps:
+            logger.info(f"Using scheduler addr: {scheduler_bootstraps[0]}")
+            self.lattica.with_bootstraps(scheduler_bootstraps)
 
         if len(self.relay_servers) > 0:
             logger.info(f"Using relay servers: {self.relay_servers}")
@@ -139,7 +180,8 @@ class NodeChatHttpServer:
                     logger.error(
                         "Your network NAT type is symmetric, relay does not work on this type of NAT, see https://en.wikipedia.org/wiki/Network_address_translation"
                     )
-                    exit(1)
+                    self._close_lattica()
+                    return False
             except Exception as e:
                 logger.exception(f"Error in is symmetric NAT: {e}, skip")
 
@@ -160,6 +202,7 @@ class NodeChatHttpServer:
                     logger.warning(f"Failed to get scheduler addr: {e}, waiting for 3 seconds.")
             if self.scheduler_peer_id is None:
                 logger.error("Failed to get scheduler peer id")
+                self._close_lattica()
                 return False
 
         # ensure connect to scheduler
@@ -169,7 +212,7 @@ class NodeChatHttpServer:
             logger.warning("Scheduler peer id not found, waiting for 1 second.")
             time.sleep(1)
 
-        self.lattica.close()
+        self._close_lattica()
         return False
 
     async def chat_completion(self, request_data, request_id: str, received_ts: int):
@@ -206,9 +249,18 @@ class NodeChatHttpServer:
                         return resp
                     else:
                         response = stub.chat_completion(request_data)
-                        content = (await anext(iterate_in_threadpool(response))).decode()
+                        chunks = []
+                        try:
+                            iterator = iterate_in_threadpool(response)
+                            async for chunk in iterator:
+                                chunks.append(chunk)
+                        finally:
+                            response.cancel()
+
+                        content = b"".join(chunks).decode()
+                        if not content:
+                            raise RuntimeError("Upstream chat completion returned an empty body")
                         logger.debug(f"Non-stream response completed for {request_id}")
-                        # response is a JSON string; parse to Python object before returning
                         return JSONResponse(content=json.loads(content))
                 except Exception as e:
                     logger.exception(f"Error in _forward_request: {e}")
@@ -242,29 +294,10 @@ class NodeChatHttpServer:
 
                     async def stream_status():
                         response = stub.cluster_status()
-
-                        async def non_blocking_next_streamiter(stream_iter, timeout=0.01):
-                            try:
-                                chunk = await asyncio.wait_for(
-                                    asyncio.get_event_loop().run_in_executor(
-                                        None, next, stream_iter
-                                    ),
-                                    timeout=timeout,
-                                )
-                                return chunk
-                            except asyncio.TimeoutError:
-                                return None
-                            except StopIteration:
-                                return None
-
                         try:
-                            as_iterator = iter(response)
-                            for _ in range(60):
-                                await asyncio.sleep(1)
-                                chunk = await non_blocking_next_streamiter(as_iterator, timeout=0.1)
-                                if chunk is None:
-                                    continue
-                                yield (chunk)
+                            iterator = iterate_in_threadpool(response)
+                            async for chunk in iterator:
+                                yield chunk
                         finally:
                             response.cancel()
 
@@ -320,8 +353,14 @@ class NodeChatHttpServer:
         1. The HTTP server and executor both run in the main process.
         2. Inter-process communication is done through IPC (each process uses a different port) via the ZMQ library.
         """
-        while not self.build_lattica():
-            logger.error("Failed to build lattica, waiting for 10 seconds")
+        for attempt in range(1, self._max_build_attempts + 1):
+            if self.build_lattica():
+                break
+            if attempt == self._max_build_attempts:
+                raise RuntimeError("Failed to build Lattica for node chat")
+            logger.error(
+                f"Failed to build lattica, waiting for 10 seconds before retry {attempt + 1}/{self._max_build_attempts}"
+            )
             time.sleep(10)
         logger.info("Lattica built successfully")
 

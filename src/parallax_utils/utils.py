@@ -1,6 +1,9 @@
 from typing import Optional
 
-import torch
+try:
+    import torch
+except Exception:
+    torch = None
 
 from parallax.server.server_info import HardwareInfo
 from parallax_utils.logging_config import get_logger
@@ -17,7 +20,7 @@ def bytes_per_element(dtype) -> int:
 
     if dtype is None:
         return 2
-    if dtype in (
+    if torch is not None and dtype in (
         getattr(torch, "float32", None),
         getattr(torch, "bfloat16", None),
         getattr(torch, "float16", None),
@@ -55,7 +58,7 @@ def compute_max_tokens_in_cache(
     """Estimate max tokens storable in KV cache given current free memory and fraction."""
     if available_cache_bytes is not None:
         available_cache_size = int(available_cache_bytes)
-    elif device == "cuda":
+    elif device == "cuda" and torch is not None:
         free_bytes, _ = torch.cuda.mem_get_info(torch.cuda.current_device())
         available_cache_size = int(free_bytes * kv_cache_memory_fraction)
     else:

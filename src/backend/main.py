@@ -13,6 +13,7 @@ from backend.server.request_handler import RequestHandler
 from backend.server.scheduler_manage import SchedulerManage
 from backend.server.server_args import parse_args
 from backend.server.static_config import (
+    get_model_info,
     get_model_list,
     get_node_join_command,
     init_model_info_dict_cache,
@@ -36,6 +37,53 @@ logger = get_logger(__name__)
 
 scheduler_manage = None
 request_handler = RequestHandler()
+
+
+def _coerce_init_nodes_num(value):
+    try:
+        init_nodes_num = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("init_nodes_num must be an integer") from exc
+    if init_nodes_num < 1:
+        raise ValueError("init_nodes_num must be greater than 0")
+    return init_nodes_num
+
+
+def _coerce_is_local_network(value):
+    if value is None:
+        if scheduler_manage is not None:
+            return scheduler_manage.get_is_local_network()
+        return True
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    raise ValueError("is_local_network must be a boolean")
+
+
+async def _validate_scheduler_init_request(request_data):
+    model_name = request_data.get("model_name")
+    if not isinstance(model_name, str) or not model_name.strip():
+        raise ValueError("model_name is required")
+    model_name = model_name.strip()
+
+    init_nodes_num = _coerce_init_nodes_num(request_data.get("init_nodes_num"))
+    is_local_network = _coerce_is_local_network(request_data.get("is_local_network"))
+
+    try:
+        model_info = await asyncio.to_thread(
+            get_model_info, model_name, scheduler_manage.use_hfcache
+        )
+    except Exception as exc:
+        raise ValueError(f"model_name is invalid or unavailable: {model_name}") from exc
+    if model_info is None:
+        raise ValueError(f"model_name is invalid or unavailable: {model_name}")
+
+    return model_name, init_nodes_num, is_local_network
 
 
 @app.post("/weight/refit")
@@ -85,31 +133,32 @@ async def model_list():
 
 @app.post("/scheduler/init")
 async def scheduler_init(raw_request: Request):
-    request_data = await raw_request.json()
-    model_name = request_data.get("model_name")
-    init_nodes_num = request_data.get("init_nodes_num")
-    is_local_network = request_data.get("is_local_network")
-
-    # Validate required parameters
-    if model_name is None:
+    if scheduler_manage is None:
         return JSONResponse(
             content={
                 "type": "scheduler_init",
-                "error": "model_name is required",
+                "error": "scheduler is not initialized",
             },
-            status_code=400,
+            status_code=503,
         )
-    if init_nodes_num is None:
+
+    request_data = await raw_request.json()
+    try:
+        model_name, init_nodes_num, is_local_network = await _validate_scheduler_init_request(
+            request_data
+        )
+    except ValueError as exc:
         return JSONResponse(
             content={
                 "type": "scheduler_init",
-                "error": "init_nodes_num is required",
+                "error": str(exc),
             },
             status_code=400,
         )
 
     try:
-        # If scheduler is already running, stop it first
+        # Validate the incoming model config before this boundary so a healthy scheduler
+        # is not torn down for malformed requests.
         if scheduler_manage.is_running():
             logger.info(f"Stopping existing scheduler to switch to model: {model_name}")
             scheduler_manage.stop()

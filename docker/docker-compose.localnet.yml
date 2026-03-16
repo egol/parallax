@@ -1,0 +1,59 @@
+name: parallax-localnet
+
+services:
+  host:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.localnet
+    image: mycelia/parallax-localnet:dev
+    command: sleep infinity
+    working_dir: /parallax
+    tty: true
+    stdin_open: true
+    environment:
+      PARALLAX_TEST_MODE: "1"
+    hostname: host
+    networks:
+      parallax-net:
+        aliases: [host]
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+
+  worker1:
+    image: mycelia/parallax-localnet:dev
+    command: sleep infinity
+    working_dir: /parallax
+    tty: true
+    stdin_open: true
+    environment:
+      PARALLAX_TEST_MODE: "1"
+    hostname: worker1
+    depends_on: [host]
+    networks:
+      parallax-net:
+        aliases: [worker1]
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+
+  worker2:
+    image: mycelia/parallax-localnet:dev
+    command: sleep infinity
+    working_dir: /parallax
+    tty: true
+    stdin_open: true
+    environment:
+      PARALLAX_TEST_MODE: "1"
+    hostname: worker2
+    depends_on: [host]
+    networks:
+      parallax-net:
+        aliases: [worker2]
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+
+networks:
+  parallax-net:
+    driver: bridge
+
+volumes:
+  hf-cache:

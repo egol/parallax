@@ -1,34 +1,49 @@
+from __future__ import annotations
+
 """Utility functions."""
 
 import random
 import socket
 from typing import List
 
-import mlx.core as mx
 import numpy as np
 import psutil
-import torch
 import zmq
-from mlx_lm.utils import _download, load_config
+
+try:
+    import mlx.core as mx
+except Exception:  # pragma: no cover - unavailable in lightweight test images
+    mx = None
+
+try:
+    import torch
+except Exception:  # pragma: no cover - unavailable in lightweight test images
+    torch = None
+
+try:
+    from mlx_lm.utils import _download, load_config
+except Exception:  # pragma: no cover - unavailable in lightweight test images
+    _download = None
+    load_config = None
 
 from parallax.utils.selective_download import download_metadata_only
 
 
 def is_cuda_available():
     """Check backend supports cuda"""
-    return torch.cuda.is_available()
+    return torch is not None and torch.cuda.is_available()
 
 
 def is_mps_available():
     """Check backend supports mps"""
-    return torch.mps.is_available()
+    return torch is not None and hasattr(torch, "mps") and torch.mps.is_available()
 
 
 def is_metal_available():
     """Check if MLX Metal backend is available"""
     try:
-        import mlx.core as mx
-
+        if mx is None:
+            return False
         mx.metal.device_info()
         return True
     except (RuntimeError, AttributeError, ImportError):
@@ -51,12 +66,16 @@ def get_current_device():
 def get_device_dtype(dtype_str: str, device: str):
     """Gets the real data type according to current device"""
     if device is not None and device.startswith("cuda"):
+        if torch is None:
+            raise RuntimeError("Torch is required for CUDA dtype resolution")
         dtype_map = {
             "float16": torch.float16,
             "bfloat16": torch.bfloat16,
             "float32": torch.float32,
         }
     else:
+        if mx is None:
+            raise RuntimeError("MLX is required for non-CUDA dtype resolution")
         dtype_map = {
             "float16": mx.float16,
             "bfloat16": mx.bfloat16,
@@ -110,15 +129,15 @@ def get_zmq_socket(context: zmq.Context, socket_type: zmq.SocketType, endpoint: 
 
 def get_infinite_value_by_dtype(dtype: mx.Dtype):
     """Returns infinite value according to mx dtype"""
+    if mx is None:
+        raise RuntimeError("MLX is required for dtype-specific infinity values")
     inf = 6e4
     if dtype in (mx.bfloat16, mx.float32):
         inf = 1e9
     return inf
 
 
-def pad_prefix_caches(
-    cache: List, input_lengths: List, dtype: mx.Dtype = mx.bfloat16
-) -> tuple[mx.array, mx.array]:
+def pad_prefix_caches(cache: List, input_lengths: List, dtype=None) -> tuple[mx.array, mx.array]:
     """
     Pads prefix kv caches.
 
@@ -126,6 +145,11 @@ def pad_prefix_caches(
         - mx.array: The padded batch of caches with a shape of [B, max_input_seq_len].
         - mx.array: The corresponding 4D k mask with a shape of [B, 1, 1, max_output_seq_len].
     """
+    if mx is None:
+        raise RuntimeError("MLX is required for prefix cache padding")
+    if dtype is None:
+        dtype = mx.bfloat16
+
     caches_mx = [mx.array(i) if isinstance(i, np.ndarray) else i for i in cache]
 
     seq_len_axis = 2
@@ -158,9 +182,7 @@ def pad_prefix_caches(
     return padded_batch, attention_mask
 
 
-def pad_inputs(
-    pad_value: int, inputs: List, dtype: mx.Dtype = mx.bfloat16
-) -> tuple[mx.array, mx.array]:
+def pad_inputs(pad_value: int, inputs: List, dtype=None) -> tuple[mx.array, mx.array]:
     """
     Pads a list of sequences (token ID lists or hidden state arrays) to the same length.
     # TODO: refactor this allow cumstomized dim.
@@ -177,6 +199,11 @@ def pad_inputs(
         - mx.array: The padded batch of inputs.
         - mx.array: The corresponding 4D attention mask.
     """
+    if mx is None:
+        raise RuntimeError("MLX is required for input padding")
+    if dtype is None:
+        dtype = mx.bfloat16
+
     if not inputs:
         return mx.array([]), mx.array([])
 
@@ -238,7 +265,7 @@ def pad_inputs(
     return padded_batch, attention_mask
 
 
-def create_causal_mask(seq_len: int, total_len: int, dtype=mx.bfloat16) -> mx.array:
+def create_causal_mask(seq_len: int, total_len: int, dtype=None) -> mx.array:
     """
     Creates a causal attention mask of shape (input_seq, total_seq).
 
@@ -263,9 +290,7 @@ def create_causal_mask(seq_len: int, total_len: int, dtype=mx.bfloat16) -> mx.ar
     return final_mask
 
 
-def combine_padding_and_causal_masks(
-    padding_mask: mx.array, causal_mask: mx.array, dtype=mx.bfloat16
-) -> mx.array:
+def combine_padding_and_causal_masks(padding_mask: mx.array, causal_mask: mx.array, dtype=None):
     """
     Combines a padding mask and a causal mask.
 
@@ -286,6 +311,8 @@ def combine_padding_and_causal_masks(
 
 def fetch_model_from_hf(name: str, local_files_only: bool = False):
     """Fetch model from huggingface and returns model config"""
+    if _download is None or load_config is None:
+        raise RuntimeError("MLX-LM is required to fetch model metadata")
 
     if local_files_only:
         model_path = download_metadata_only(name, local_files_only=local_files_only)
@@ -360,3 +387,12 @@ def get_layer_types(config: dict, start_layer: int, end_layer: int) -> List[str]
 
     # Default: all attention layers
     return ["attention"] * num_shard_layers
+    if mx is None:
+        raise RuntimeError("MLX is required for causal mask creation")
+    if dtype is None:
+        dtype = mx.bfloat16
+
+    if mx is None:
+        raise RuntimeError("MLX is required for attention mask combination")
+    if dtype is None:
+        dtype = mx.bfloat16
