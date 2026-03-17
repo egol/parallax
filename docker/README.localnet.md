@@ -36,10 +36,22 @@ For the fully automated smoke path:
 ./parallax/docker/run_localnet_smoke.sh
 ```
 
+For the abrupt-disconnect synthetic chaos path:
+
+```bash
+./parallax/docker/run_localnet_chaos_smoke.sh
+```
+
 For the real-model CPU smoke path:
 
 ```bash
 ./parallax/docker/run_localnet_real_model_smoke.sh
+```
+
+For the abrupt-disconnect real-model chaos path:
+
+```bash
+./parallax/docker/run_localnet_real_model_chaos.sh
 ```
 
 By default the real-model smoke preserves Docker volumes, including the shared
@@ -182,6 +194,14 @@ switches worker test mode to a tiny CPU Hugging Face model so completions come
 from an actual model instead of the synthetic echo backend. It is still a
 best-effort local smoke: cold-cache downloads, CPU-only inference, and slower
 network conditions can make it materially slower than the synthetic harness.
+
+`parallax/docker/run_localnet_chaos_smoke.sh` adds an abrupt worker container
+stop/start during serving and verifies that the scheduler degrades and
+recovers without wedging.
+
+`parallax/docker/run_localnet_real_model_chaos.sh` does the same with the tiny
+real-model lane, then adds a process-level worker kill/restart so both
+container-level and process-level reconnect behavior are covered.
 
 ## Shutdown
 
