@@ -186,17 +186,27 @@ class TransformerConnectionHandler(ConnectionHandler):
                 if request.get("stream", False):
                     with client.stream(
                         "POST",
-                        f"http://localhost:{self.http_port}/v1/chat/completions",
+                        f"http://127.0.0.1:{self.http_port}/v1/chat/completions",
                         json=request,
                     ) as response:
+                        response.raise_for_status()
                         for chunk in response.iter_bytes():
                             if chunk:
                                 yield chunk
                 else:
                     response = client.post(
-                        f"http://localhost:{self.http_port}/v1/chat/completions", json=request
+                        f"http://127.0.0.1:{self.http_port}/v1/chat/completions", json=request
                     )
+                    response.raise_for_status()
                     yield response.content
+        except httpx.HTTPStatusError as e:
+            detail = e.response.text[:1000] if e.response is not None else ""
+            logger.exception(
+                "Error in chat completion upstream response "
+                f"(status={getattr(e.response, 'status_code', 'unknown')}, "
+                f"body={detail!r})"
+            )
+            yield f"upstream http error: {detail}".encode()
         except Exception as e:
             logger.exception(f"Error in chat completion: {e}")
             yield b"internal server error"
@@ -420,6 +430,10 @@ class GradientServer:
                 status=self.status.value,
                 _layer_allocation_changed=self._layer_allocation_changed,
             )
+            self._shared_state.update_runtime_state(
+                status=self.status.value,
+                model_name=self.model_name,
+            )
 
     def check_and_release_disk_weight(self):
         """Only save 3 history versions of weight"""
@@ -558,9 +572,11 @@ class GradientServer:
             last_error = None
             for attempt in range(1, self._max_join_attempts + 1):
                 try:
-                    self.scheduler_stub = RPCConnectionHandler(self.lattica, None, None).get_stub(
-                        self.scheduler_peer_id
-                    )
+                    self.scheduler_stub = RPCConnectionHandler(
+                        self.lattica,
+                        None,
+                        self.http_port,
+                    ).get_stub(self.scheduler_peer_id)
                     node_info = self.get_node_info()
                     if node_info == {}:
                         raise RuntimeError("Failed to get node info from the scheduler network")
@@ -568,25 +584,10 @@ class GradientServer:
                     if self.manual_layer_assignment:
                         node_info["manual_layer_assignment"] = True
 
-                    while True:
-                        response = self.scheduler_stub.node_join(node_info)
-                        response = response.result(timeout=300)
-                        if response.get("pending"):
-                            logger.info(
-                                "Scheduler peer is reachable but no model is initialized yet, retrying node_join in 2 seconds"
-                            )
-                            time.sleep(2)
-                            node_info = self.get_node_info()
-                            if node_info == {}:
-                                raise RuntimeError(
-                                    "Failed to refresh node info from the scheduler network"
-                                )
-                            if self.manual_layer_assignment:
-                                node_info["manual_layer_assignment"] = True
-                            continue
-                        if response == {}:
-                            raise RuntimeError("Failed to join scheduler")
-                        break
+                    response = self.scheduler_stub.node_join(node_info)
+                    response = response.result(timeout=300)
+                    if response == {}:
+                        raise RuntimeError("Failed to join scheduler")
 
                     logger.info(f"Join scheduler response: {response}")
 
@@ -838,12 +839,6 @@ class GradientServer:
 
                             # Print layer allocation information
                             if response and isinstance(response, dict):
-                                if response.get("pending"):
-                                    logger.debug(
-                                        "Heartbeat acknowledged before scheduler initialization finished"
-                                    )
-                                    time.sleep(2)
-                                    continue
                                 start_layer = response.get("start_layer")
                                 end_layer = response.get("end_layer")
                                 model_name = response.get("model_name")
@@ -877,6 +872,17 @@ class GradientServer:
 
                                         # Sync to shared state if available
                                         self._sync_to_shared_state()
+                                        if self._shared_state is not None:
+                                            self._shared_state.update_runtime_state(
+                                                status=self.status.value,
+                                                model_name=self.model_name,
+                                                init_stage="allocating",
+                                                init_detail="Layer allocation changed. Reloading the executor with the new assignment.",
+                                                downloaded_files=None,
+                                                total_files=None,
+                                                current_file="",
+                                                failure_reason="",
+                                            )
 
                                         logger.info(
                                             "Layer allocation updated. Executor will reload on next check. "
@@ -897,6 +903,16 @@ class GradientServer:
                                     self._shared_state.set_status(self.status.value)
                                     self._shared_state.update_metrics(current_requests=0)
                                     self._shared_state.set("model_name", None)
+                                    self._shared_state.update_runtime_state(
+                                        status=self.status.value,
+                                        model_name=None,
+                                        init_stage="allocating",
+                                        init_detail="Waiting for scheduler layer allocation.",
+                                        downloaded_files=None,
+                                        total_files=None,
+                                        current_file="",
+                                        failure_reason="",
+                                    )
                                 logger.debug(
                                     "Status set to JOINING and model_name to None because no valid layer allocation received yet."
                                 )
@@ -1002,6 +1018,11 @@ class GradientServer:
             "last_refit_time": self.last_refit_time,
         }
 
+        if hasattr(self, "_shared_state") and self._shared_state is not None:
+            runtime_state = self._shared_state.get_runtime_state()
+            if runtime_state:
+                info["runtime"] = runtime_state
+
         # For manual layer assignment, always include start_layer and end_layer
         if self.manual_layer_assignment:
             info["start_layer"] = self.block_start_index
@@ -1032,6 +1053,17 @@ class GradientServer:
         self.status = ServerState.OFFLINE
         # Sync final status to shared state
         self._sync_to_shared_state()
+        if hasattr(self, "_shared_state") and self._shared_state is not None:
+            self._shared_state.update_runtime_state(
+                status=self.status.value,
+                model_name=self.model_name,
+                init_stage="idle",
+                init_detail="Worker is offline.",
+                downloaded_files=None,
+                total_files=None,
+                current_file="",
+                failure_reason="",
+            )
         if self.scheduler_addr is not None:
             logger.info(f"Leave scheduler: {self.lattica.peer_id()}")
             self.scheduler_stub.node_leave(self.get_node_info(is_update=True))
@@ -1114,6 +1146,20 @@ def _run_p2p_server_process(
                 enable_weight_refit=False,
                 weight_refit_mode="disk",
                 status=server.status.value,
+            )
+            shared_state.update_runtime_state(
+                status=server.status.value,
+                model_name=server.model_name,
+                init_stage="allocating" if scheduler_addr is not None else "idle",
+                init_detail=(
+                    "Waiting for scheduler layer allocation."
+                    if scheduler_addr is not None
+                    else ""
+                ),
+                downloaded_files=None,
+                total_files=None,
+                current_file="",
+                failure_reason="",
             )
 
         server.run()

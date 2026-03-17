@@ -196,6 +196,13 @@ class BaseExecutor:
                 )
         if self.shared_state is not None:
             self.shared_state.set_status(ServerState.READY.value)
+            self.shared_state.update_runtime_state(
+                status=ServerState.READY.value,
+                model_name=self.config.get("model_name"),
+                init_stage="ready",
+                init_detail="Model shard is loaded and ready to serve requests.",
+                failure_reason="",
+            )
 
         # store max_sequence_length
         self.max_sequence_length = max_sequence_length

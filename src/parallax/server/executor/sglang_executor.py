@@ -136,6 +136,7 @@ class SGLExecutor(BaseExecutor):
             "lora_eviction_policy": self.lora_eviction_policy,
             "lora_backend": self.lora_backend,
             "max_lora_chunk_size": self.max_lora_chunk_size,
+            "shared_state": shared_state,
         }
         logger.debug(
             f"Initializing SGLang model runner for repo={model_repo}, layers=[{start_layer}, {end_layer})"

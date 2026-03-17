@@ -112,6 +112,7 @@ class MLXExecutor(BaseExecutor):
             start_layer=start_layer,
             end_layer=end_layer,
             use_hfcache=use_hfcache,
+            shared_state=shared_state,
         )
         t0 = time.time()
         self.model_shard, self.config, self.tokenizer = self.shard_loader.load()

@@ -270,6 +270,7 @@ def initialize_sgl_model_runner(
     lora_backend: Optional[str] = "triton",
     max_lora_chunk_size: Optional[int] = 128,
     enable_dp_attention: bool = False,
+    shared_state=None,
     **kwargs,
 ):
     """
@@ -295,7 +296,11 @@ def initialize_sgl_model_runner(
         f"Downloading model with selective weight files for layers [{start_layer}, {end_layer})"
     )
     model_path = get_model_path_with_selective_download(
-        model_repo, start_layer=start_layer, end_layer=end_layer, local_files_only=use_hfcache
+        model_repo,
+        start_layer=start_layer,
+        end_layer=end_layer,
+        local_files_only=use_hfcache,
+        shared_state=shared_state,
     )
 
     config = load_config(model_path)

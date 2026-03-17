@@ -142,6 +142,7 @@ class VLLMExecutor(BaseExecutor):
             "fully_sharded_loras": fully_sharded_loras,
             "enable_return_routed_experts": self.enable_return_routed_experts,
             "instance_id": self.routed_experts_instance_id,
+            "shared_state": shared_state,
         }
         logger.debug(
             f"Initializing vLLM model runner for repo={model_repo}, layers=[{start_layer}, {end_layer})"

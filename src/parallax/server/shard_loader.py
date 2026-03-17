@@ -10,16 +10,17 @@ import types
 from typing import Any, Dict, Optional, Tuple
 
 import mlx.core as mx
-from huggingface_hub import snapshot_download
 from mlx import nn
 from mlx.utils import tree_unflatten
 from mlx_lm.models.switch_layers import QuantizedSwitchLinear, SwitchLinear
 from mlx_lm.tuner.dora import DoRAEmbedding, DoRALinear
 from mlx_lm.tuner.lora import LoRAEmbedding, LoRALinear, LoRASwitchLinear
-from mlx_lm.utils import _download, load_config
+from mlx_lm.utils import load_config
 
 from parallax.server.model import ShardedModel
+from parallax.utils.selective_download import get_model_path_with_selective_download
 from parallax.utils.tokenizer_utils import load_tokenizer
+from parallax.utils.shared_state import SharedState
 from parallax_utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -42,6 +43,7 @@ class MLXModelLoader:
         start_layer: Optional[int] = None,
         end_layer: Optional[int] = None,
         use_hfcache: bool = False,
+        shared_state: Optional[dict] = None,
     ):
         """
         Initializes the model loader.
@@ -59,6 +61,7 @@ class MLXModelLoader:
         self.start_layer = start_layer
         self.end_layer = end_layer
         self.use_hfcache = use_hfcache
+        self.shared_state = SharedState(shared_state) if shared_state is not None else None
         self.register_block_class()
 
     def register_block_class(self):
@@ -224,21 +227,27 @@ class MLXModelLoader:
             A tuple containing the loaded sharded MLX model and its configuration dictionary.
         """
         if use_selective_download and self.start_layer is not None and self.end_layer is not None:
-            from parallax.utils.selective_download import (
-                get_model_path_with_selective_download,
-            )
-
             logger.info(
                 f"Using selective download for layers [{self.start_layer}, {self.end_layer})"
             )
-            model_path = get_model_path_with_selective_download(
-                self.model_path_str,
-                start_layer=self.start_layer,
-                end_layer=self.end_layer,
-                local_files_only=self.use_hfcache,
-            )
         else:
-            model_path = _download(self.model_path_str)
+            logger.info("Using full model download path for MLX model startup")
+        model_path = get_model_path_with_selective_download(
+            self.model_path_str,
+            start_layer=self.start_layer if use_selective_download else None,
+            end_layer=self.end_layer if use_selective_download else None,
+            local_files_only=self.use_hfcache,
+            shared_state=self.shared_state,
+        )
+
+        if self.shared_state is not None:
+            self.shared_state.update_runtime_state(
+                status=self.shared_state.get_status(),
+                model_name=self.model_path_str,
+                init_stage="loading-shards",
+                init_detail="Loading model shards into the MLX executor.",
+                failure_reason="",
+            )
 
         config = load_config(model_path)
         tokenizer = load_tokenizer(model_path, eos_token_ids=config.get("eos_token_id", None))

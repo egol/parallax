@@ -388,6 +388,7 @@ def initialize_vllm_model_runner(
     nccl_port: int = None,
     enable_return_routed_experts: bool = False,
     instance_id: Optional[str] = None,
+    shared_state=None,
     **kwargs,
 ) -> Tuple[ParallaxVLLMModelRunner, Dict, Any]:
     from parallax.utils.selective_download import get_model_path_with_selective_download
@@ -400,6 +401,8 @@ def initialize_vllm_model_runner(
         model_repo,
         start_layer=start_layer,
         end_layer=end_layer,
+        local_files_only=kwargs.get("using_hfcache", False),
+        shared_state=shared_state,
     )
 
     config = load_config(model_path)

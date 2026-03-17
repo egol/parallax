@@ -133,6 +133,37 @@ class SharedState:
         """Set current status."""
         self._dict["status"] = status
 
+    def get_runtime_state(self) -> Dict[str, Any]:
+        """Get a shallow copy of explicit worker runtime/init state."""
+        runtime_dict = self._dict.get("runtime_state")
+        if not runtime_dict:
+            return {}
+        return {k: runtime_dict[k] for k in runtime_dict.keys()}
+
+    def update_runtime_state(self, **kwargs) -> None:
+        """Update explicit worker runtime/init state fields."""
+        runtime_dict = self._dict.get("runtime_state")
+        if not runtime_dict:
+            raise RuntimeError("runtime_state not initialized in shared_state")
+        for key, value in kwargs.items():
+            runtime_dict[key] = value
+        runtime_dict["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    def reset_runtime_state(self) -> None:
+        """Reset worker runtime/init state to defaults."""
+        runtime_dict = self._dict.get("runtime_state")
+        if not runtime_dict:
+            raise RuntimeError("runtime_state not initialized in shared_state")
+        runtime_dict["status"] = self._dict.get("status")
+        runtime_dict["model_name"] = self._dict.get("model_name")
+        runtime_dict["init_stage"] = "idle"
+        runtime_dict["init_detail"] = ""
+        runtime_dict["downloaded_files"] = None
+        runtime_dict["total_files"] = None
+        runtime_dict["current_file"] = ""
+        runtime_dict["failure_reason"] = ""
+        runtime_dict["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
     @classmethod
     def create(cls) -> "SharedState":
         """Create a new SharedState with default initialization.
@@ -158,5 +189,18 @@ class SharedState:
         shared_dict["metrics"]["current_requests"] = 0
         shared_dict["metrics"]["layer_latency_ms"] = None
         shared_dict["metrics"]["_last_update_ts"] = 0.0
+
+        shared_dict["runtime_state"] = manager.dict()
+        shared_dict["runtime_state"]["status"] = None
+        shared_dict["runtime_state"]["model_name"] = None
+        shared_dict["runtime_state"]["init_stage"] = "idle"
+        shared_dict["runtime_state"]["init_detail"] = ""
+        shared_dict["runtime_state"]["downloaded_files"] = None
+        shared_dict["runtime_state"]["total_files"] = None
+        shared_dict["runtime_state"]["current_file"] = ""
+        shared_dict["runtime_state"]["failure_reason"] = ""
+        shared_dict["runtime_state"]["updated_at"] = time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+        )
 
         return cls(shared_dict)

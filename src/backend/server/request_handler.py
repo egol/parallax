@@ -38,7 +38,12 @@ class RequestHandler:
 
     def get_stub(self, node_id):
         if node_id not in self.stubs:
-            self.stubs[node_id] = self.scheduler_manage.completion_handler.get_stub(node_id)
+            if (
+                self.scheduler_manage is None
+                or self.scheduler_manage.connection_handler is None
+            ):
+                raise RuntimeError("Scheduler connection handler is not ready")
+            self.stubs[node_id] = self.scheduler_manage.connection_handler.get_stub(node_id)
         return self.stubs[node_id]
 
     async def _forward_request(self, request_data: Dict, request_id: str, received_ts: int):
@@ -157,7 +162,9 @@ class RequestHandler:
                 if forward_attempts < self.MAX_FORWARD_RETRY:
                     # small async delay before re-forwarding
                     await asyncio.sleep(self.FORWARD_DELAY_SEC)
-                logger.warning(f"Error in _forward_request: {e}. Retry attemps {forward_attempts}")
+                logger.exception(
+                    f"Error in _forward_request: {e}. Retry attemps {forward_attempts}"
+                )
 
         return JSONResponse(
             content={"error": "Internal server error"},

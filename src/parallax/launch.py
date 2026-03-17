@@ -158,6 +158,12 @@ if __name__ == "__main__":
     # Shared state for layer allocation info (used when P2P server is in subprocess)
     shared_state = SharedState.create()
     shared_state.set_status(ServerState.JOINING.value)
+    shared_state.update_runtime_state(
+        status=ServerState.JOINING.value,
+        init_stage="allocating",
+        init_detail="Waiting for scheduler layer allocation.",
+        failure_reason="",
+    )
 
     try:
         args = parse_args()
@@ -237,6 +243,13 @@ if __name__ == "__main__":
 
             time.sleep(2)  # Give executors time to start
             shared_state.set_status(ServerState.READY.value)
+            shared_state.update_runtime_state(
+                status=ServerState.READY.value,
+                model_name=args.model_path,
+                init_stage="ready",
+                init_detail="Standalone Parallax node is ready.",
+                failure_reason="",
+            )
 
             # Wait for all executor processes
             for proc in executor_subprocs:
@@ -285,11 +298,27 @@ if __name__ == "__main__":
                     break
                 if time.time() - wait_start > max_wait_time:
                     logger.error("Timeout waiting for layer allocation from scheduler")
+                    shared_state.update_runtime_state(
+                        status=ServerState.JOINING.value,
+                        init_stage="failed",
+                        init_detail="Timed out waiting for layer allocation from the scheduler.",
+                        failure_reason="Failed to get layer allocation from scheduler",
+                    )
                     raise RuntimeError("Failed to get layer allocation from scheduler")
                 time.sleep(1)
 
             # Get layer allocation from shared state
             _update_args_from_shared_state(args, shared_state, force_update=False)
+            shared_state.update_runtime_state(
+                status=ServerState.INITIALIZING.value,
+                model_name=args.model_path,
+                init_stage="allocating",
+                init_detail=(
+                    f"Received layer allocation [{args.start_layer}, {args.end_layer}); "
+                    "initializing executors."
+                ),
+                failure_reason="",
+            )
 
             logger.debug(
                 f"Start Executor with start_layer: {args.start_layer}, end_layer: {args.end_layer}, "
@@ -313,11 +342,28 @@ if __name__ == "__main__":
                             "chat serving and no executor processes"
                         )
                         shared_state.set_status(ServerState.READY.value)
+                        shared_state.update_runtime_state(
+                            status=ServerState.READY.value,
+                            model_name=args.model_path,
+                            init_stage="ready",
+                            init_detail="Synthetic Parallax test worker is ready.",
+                            failure_reason="",
+                        )
                         if _wait_worker_check_layer_change(p2p_server_process, shared_state):
                             logger.warning("Layer allocation changed! Reloading test worker...")
                             shared_state.update(
                                 _layer_allocation_changed=False,
                                 status=ServerState.INITIALIZING.value,
+                            )
+                            shared_state.update_runtime_state(
+                                status=ServerState.INITIALIZING.value,
+                                model_name=args.model_path,
+                                init_stage="allocating",
+                                init_detail="Layer allocation changed; reloading the worker.",
+                                downloaded_files=None,
+                                total_files=None,
+                                current_file="",
+                                failure_reason="",
                             )
                             if http_server_process is not None:
                                 _stop_http_server_for_mode(http_server_process, test_mode)
@@ -341,6 +387,16 @@ if __name__ == "__main__":
                             _layer_allocation_changed=False,
                             status=ServerState.INITIALIZING.value,
                         )
+                        shared_state.update_runtime_state(
+                            status=ServerState.INITIALIZING.value,
+                            model_name=args.model_path,
+                            init_stage="allocating",
+                            init_detail="Layer allocation changed; reloading the executor.",
+                            downloaded_files=None,
+                            total_files=None,
+                            current_file="",
+                            failure_reason="",
+                        )
                         _stop_executor_processes(executor_subprocs)
                         if http_server_process is not None:
                             _stop_http_server_for_mode(http_server_process, test_mode)
@@ -358,6 +414,13 @@ if __name__ == "__main__":
                     break
                 except Exception as e:
                     logger.exception(f"Executor error: {e}")
+                    shared_state.update_runtime_state(
+                        status=ServerState.INITIALIZING.value,
+                        model_name=args.model_path,
+                        init_stage="failed",
+                        init_detail="Executor startup failed.",
+                        failure_reason=str(e),
+                    )
                     # Shutdown all executor processes on error
                     from parallax.server.executor.factory import stop_executor_process
 
@@ -369,6 +432,13 @@ if __name__ == "__main__":
         logger.debug("Received interrupt signal, shutting down...")
     except Exception as e:
         logger.exception(e)
+        shared_state.update_runtime_state(
+            status=shared_state.get_status(),
+            model_name=shared_state.get("model_name"),
+            init_stage="failed",
+            init_detail="Parallax worker startup failed.",
+            failure_reason=str(e),
+        )
     finally:
         # Shutdown all processes
         logger.debug("Shutting down all processes...")

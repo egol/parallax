@@ -1,5 +1,3 @@
-import time
-
 from lattica import ConnectionHandler, Lattica, rpc_method, rpc_stream, rpc_stream_iter
 
 from parallax_utils.logging_config import get_logger
@@ -51,8 +49,12 @@ class RPCConnectionHandler(ConnectionHandler):
         if self.scheduler_manage is not None:
             self.scheduler_manage.register_discovered_node(message)
         if self.scheduler is None:
-            logger.warning("Received node_join before scheduler initialization completed")
-            return {"pending": True, "reason": "scheduler_not_initialized"}
+            if self.scheduler_manage is None or not self.scheduler_manage.wait_for_scheduler_ready(
+                timeout=300
+            ):
+                logger.warning("Timed out waiting for scheduler readiness during node_join")
+                return {}
+            self.scheduler = self.scheduler_manage.scheduler
         try:
             node = self.build_node(message)
             self.scheduler.enqueue_join(node)
@@ -95,7 +97,11 @@ class RPCConnectionHandler(ConnectionHandler):
         if self.scheduler_manage is not None:
             self.scheduler_manage.register_discovered_node(message)
         if self.scheduler is None:
-            return {"pending": True, "reason": "scheduler_not_initialized"}, {}
+            if self.scheduler_manage is None or not self.scheduler_manage.wait_for_scheduler_ready(
+                timeout=30
+            ):
+                return {}, {}
+            self.scheduler = self.scheduler_manage.scheduler
         try:
             node = self.build_node(message)
             # Check if node exists in scheduler
@@ -105,8 +111,6 @@ class RPCConnectionHandler(ConnectionHandler):
                     f"Node {node.node_id} not found in scheduler, auto-joining via node_update"
                 )
                 self.scheduler.enqueue_join(node)
-                # Wait a bit for join to be processed
-                time.sleep(0.1)
                 # Return layer allocation after join
                 layer_allocation = self.wait_layer_allocation(node.node_id, wait_seconds=5)
                 return layer_allocation, {}
@@ -144,17 +148,27 @@ class RPCConnectionHandler(ConnectionHandler):
                 if request.get("stream", False):
                     with client.stream(
                         "POST",
-                        f"http://localhost:{self.http_port}/v1/chat/completions",
+                        f"http://127.0.0.1:{self.http_port}/v1/chat/completions",
                         json=request,
                     ) as response:
+                        response.raise_for_status()
                         for chunk in response.iter_bytes():
                             if chunk:
                                 yield chunk
                 else:
                     response = client.post(
-                        f"http://localhost:{self.http_port}/v1/chat/completions", json=request
-                    ).json()
-                    yield json.dumps(response).encode()
+                        f"http://127.0.0.1:{self.http_port}/v1/chat/completions", json=request
+                    )
+                    response.raise_for_status()
+                    yield response.content
+        except httpx.HTTPStatusError as e:
+            detail = e.response.text[:1000] if e.response is not None else ""
+            logger.exception(
+                "Error in chat completion upstream response "
+                f"(status={getattr(e.response, 'status_code', 'unknown')}, "
+                f"body={detail!r})"
+            )
+            yield f"upstream http error: {detail}".encode()
         except Exception as e:
             logger.exception(f"Error in chat completion: {e}")
             yield b"internal server error"
@@ -164,7 +178,7 @@ class RPCConnectionHandler(ConnectionHandler):
         try:
             with httpx.Client(timeout=10 * 60, proxy=None, trust_env=False) as client:
                 with client.stream(
-                    "GET", f"http://localhost:{self.http_port}/cluster/status"
+                    "GET", f"http://127.0.0.1:{self.http_port}/cluster/status"
                 ) as response:
                     for chunk in response.iter_bytes():
                         if chunk:
@@ -174,16 +188,16 @@ class RPCConnectionHandler(ConnectionHandler):
             yield json.dumps({"error": "internal server error"}).encode()
 
     def wait_layer_allocation(self, current_node_id, wait_seconds):
-        start_time = time.time()
-        while True:
-            layer_allocation = self.get_layer_allocation(current_node_id)
-            if layer_allocation:
-                return layer_allocation
-            if time.time() - start_time > wait_seconds:
-                return {}
-            time.sleep(0.5)
+        if self.scheduler_manage is not None:
+            allocation = self.scheduler_manage.wait_for_node_allocation(
+                current_node_id, wait_seconds
+            )
+            return allocation or {}
+        return {}
 
     def get_layer_allocation(self, current_node_id):
+        if self.scheduler_manage is not None:
+            return self.scheduler_manage.get_layer_allocation(current_node_id)
         list_node_allocations = self.scheduler.list_node_allocations()
         for node_id, start_layer, end_layer in list_node_allocations:
             if current_node_id == node_id:

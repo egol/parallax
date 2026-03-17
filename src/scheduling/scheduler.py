@@ -8,7 +8,7 @@ import queue
 import threading
 import time
 from collections import deque
-from typing import Deque, Dict, List, Literal, Optional, Tuple
+from typing import Callable, Deque, Dict, List, Literal, Optional, Tuple
 
 from parallax_utils.logging_config import get_logger
 from scheduling.layer_allocation import (
@@ -44,6 +44,7 @@ class Scheduler:
         water_filling_max_iterations: int = 40,
         heartbeat_timeout: float = 30.0,
         trim_layers_on_turning_points: bool = False,
+        state_change_callback: Optional[Callable[[str], None]] = None,
     ) -> None:
         """Initialize the scheduler.
 
@@ -125,6 +126,15 @@ class Scheduler:
         self.refit_request = {}
         self.refit_set = set()
         self.last_refit_time = 0.0
+        self._state_change_callback = state_change_callback
+
+    def _notify_state_change(self, reason: str) -> None:
+        if self._state_change_callback is None:
+            return
+        try:
+            self._state_change_callback(reason)
+        except Exception:
+            logger.debug("Scheduler state-change callback failed", exc_info=True)
 
     def list_node_allocations(
         self, total_layers: Optional[int] = None
@@ -154,6 +164,7 @@ class Scheduler:
             logger.info("[Scheduler] Rebooting, moving every node to standby")
             self.node_manager.clear_registered_pipelines()
             self._bootstrapped_event.clear()
+            self._notify_state_change("scheduler_reboot")
             overide_min_node_check = True
         else:
             # If we already bootstrapped, return True
@@ -176,6 +187,7 @@ class Scheduler:
             logger.warning("Global allocation failed to produce a full pipeline")
             # Stay un-bootstrapped so future joins can retry bootstrap.
             self._bootstrapped_event.clear()
+            self._notify_state_change("bootstrap_failed")
             return False
 
         assignments = self.node_manager.list_node_allocations(self.num_layers)
@@ -183,6 +195,7 @@ class Scheduler:
 
         self.request_router.bootstrap()
         self._bootstrapped_event.set()
+        self._notify_state_change("bootstrap_completed")
         # Snapshot at INFO after bootstrap since allocations/pipelines may have materially changed.
         self.emit_alloc_log_snapshot(reason="Post Bootstrap")
         return True
@@ -321,6 +334,7 @@ class Scheduler:
         # Notify waiters that node count changed
         # Snapshot at INFO after join since allocations/pipelines may have changed.
         self.emit_alloc_log_snapshot(reason=f"after join {node.node_id}")
+        self._notify_state_change(f"join:{node.node_id}")
         with self._node_count_cv:
             self._node_count_cv.notify_all()
 
@@ -342,6 +356,7 @@ class Scheduler:
 
         # Snapshot at INFO after leave since allocations/pipelines may have changed.
         self.emit_alloc_log_snapshot(reason=f"after leave {node_id}")
+        self._notify_state_change(f"leave:{node_id}")
 
         with self._node_count_cv:
             self._node_count_cv.notify_all()
@@ -512,6 +527,7 @@ class Scheduler:
 
     def _process_node_updates(self) -> None:
         """Apply pending node stats updates from the queue."""
+        updated_any = False
         while True:
             try:
                 node_id, cur, lat, rtts, is_active, last_refit_time = (
@@ -531,6 +547,9 @@ class Scheduler:
                 is_active=is_active,
                 last_refit_time=last_refit_time,
             )
+            updated_any = True
+        if updated_any:
+            self._notify_state_change("node_update")
 
     def _process_joins(self) -> None:
         """Handle pending join events, honoring bootstrap state for assignment."""
@@ -634,6 +653,7 @@ class Scheduler:
         """Signal background threads to stop and wake any waiters."""
         self._stop_event.set()
         self._wake_event.set()
+        self._notify_state_change("scheduler_stop")
         with self._node_count_cv:
             self._node_count_cv.notify_all()
 

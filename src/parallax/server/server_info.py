@@ -6,6 +6,7 @@ ServerInfo that will be announce to DHT and used for client's routing.
 We haven't used other info, will wait until DHT implemented.
 """
 
+import os
 import platform
 import subprocess
 from dataclasses import asdict, dataclass
@@ -20,6 +21,59 @@ try:
     import psutil
 except ImportError:
     psutil = None
+
+
+def _env_float(name: str) -> Optional[float]:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def _env_int(name: str) -> Optional[int]:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def _apply_test_hardware_overrides(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply test-only hardware advertisement overrides.
+
+    These overrides intentionally affect only the hardware summary announced to
+    the scheduler. They do not change the real local machine resources.
+    """
+    memory_gb = _env_float("PARALLAX_TEST_OVERRIDE_MEMORY_GB")
+    if memory_gb is not None:
+        payload["memory_gb"] = memory_gb
+
+    tflops_fp16 = _env_float("PARALLAX_TEST_OVERRIDE_TFLOPS_FP16")
+    if tflops_fp16 is not None:
+        payload["tflops_fp16"] = tflops_fp16
+
+    memory_bandwidth_gbps = _env_float("PARALLAX_TEST_OVERRIDE_MEMORY_BANDWIDTH_GBPS")
+    if memory_bandwidth_gbps is not None:
+        payload["memory_bandwidth_gbps"] = memory_bandwidth_gbps
+
+    num_gpus = _env_int("PARALLAX_TEST_OVERRIDE_NUM_GPUS")
+    if num_gpus is not None:
+        payload["num_gpus"] = num_gpus
+
+    gpu_name = os.getenv("PARALLAX_TEST_OVERRIDE_GPU_NAME", "").strip()
+    if gpu_name:
+        payload["gpu_name"] = gpu_name
+
+    device = os.getenv("PARALLAX_TEST_OVERRIDE_DEVICE", "").strip()
+    if device:
+        payload["device"] = device
+
+    return payload
 
 
 @dataclass
@@ -177,7 +231,7 @@ def detect_node_hardware(node_id: Optional[str]) -> Dict[str, Any]:
         hw = HardwareInfo.detect()
     except NotImplementedError:
         # Fallback to a conservative default
-        return {
+        return _apply_test_hardware_overrides({
             "node_id": node_id,
             "num_gpus": 1,
             "tflops_fp16": 50.0,
@@ -185,10 +239,10 @@ def detect_node_hardware(node_id: Optional[str]) -> Dict[str, Any]:
             "memory_gb": 16.0,
             "memory_bandwidth_gbps": 100.0,
             "device": "Unknown",
-        }
+        })
 
     if isinstance(hw, NvidiaHardwareInfo):
-        return {
+        return _apply_test_hardware_overrides({
             "node_id": node_id,
             "num_gpus": hw.num_gpus,
             "tflops_fp16": hw.tflops_fp16,
@@ -196,11 +250,11 @@ def detect_node_hardware(node_id: Optional[str]) -> Dict[str, Any]:
             "memory_gb": hw.vram_gb,
             "memory_bandwidth_gbps": hw.memory_bandwidth_gbps,
             "device": "cuda",
-        }
+        })
     if isinstance(hw, AppleSiliconHardwareInfo):
         # Use unified memory size as memory_gb; bandwidth rough estimate per family
         est_bandwidth = 100.0
-        return {
+        return _apply_test_hardware_overrides({
             "node_id": node_id,
             "num_gpus": hw.num_gpus,
             "tflops_fp16": hw.tflops_fp16,
@@ -208,9 +262,9 @@ def detect_node_hardware(node_id: Optional[str]) -> Dict[str, Any]:
             "memory_gb": hw.total_ram_gb,
             "memory_bandwidth_gbps": est_bandwidth,
             "device": "mlx",
-        }
+        })
     # Generic fallback
-    return {
+    return _apply_test_hardware_overrides({
         "node_id": node_id,
         "num_gpus": hw.num_gpus,
         "tflops_fp16": hw.tflops_fp16,
@@ -218,7 +272,7 @@ def detect_node_hardware(node_id: Optional[str]) -> Dict[str, Any]:
         "memory_gb": 16.0,
         "memory_bandwidth_gbps": 100.0,
         "device": "Unknown",
-    }
+    })
 
 
 @dataclass

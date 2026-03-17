@@ -9,7 +9,6 @@ from backend.server.constants import NODE_STATUS_AVAILABLE, NODE_STATUS_WAITING
 from backend.server.rpc_connection_handler import RPCConnectionHandler
 from backend.server.static_config import get_model_info, get_node_join_command
 from parallax.cli import PUBLIC_INITIAL_PEERS, PUBLIC_RELAY_SERVERS
-from parallax.p2p.server import TransformerConnectionHandler
 from parallax_utils.logging_config import get_logger
 from scheduling.node import RequestSignal
 from scheduling.scheduler import Scheduler
@@ -54,23 +53,24 @@ class SchedulerManage:
         self.scheduler = None
         self.node_id = f"{dht_prefix}_announce"
         self.lattica = None
-        self.completion_handler = None
         self.stubs = {}
         self.is_local_network = False
         self.network_signature = None
         self.discovered_nodes: Dict[str, Dict[str, Any]] = {}
-        self.discovered_node_ttl_seconds = 15.0
+        # A worker's initial node_join blocks until allocation is assigned, and the
+        # heartbeat updater does not start until after that returns. Keep discovered
+        # nodes alive long enough for scheduler init/bootstrap to finish on first join.
+        self.discovered_node_ttl_seconds = 360.0
         self.cluster_status_lock = threading.Lock()
+        self.cluster_status_condition = threading.Condition(self.cluster_status_lock)
         self.cluster_status_last_error = ""
         self.cluster_status_snapshot = self._empty_cluster_status_snapshot(
             snapshot_stale=False
         )
         self.cluster_status_generated_at = time.time()
-        threading.Thread(
-            target=self._cluster_status_refresh_loop,
-            name="SchedulerClusterStatus",
-            daemon=True,
-        ).start()
+        self.cluster_status_version = 0
+        self.scheduler_ready_event = threading.Event()
+        self.publish_cluster_status(reason="startup", force=True)
 
     def run(self, model_name, init_nodes_num, is_local_network=True):
         """
@@ -83,7 +83,7 @@ class SchedulerManage:
         )
         self.bootstrap_network(is_local_network)
         self._start_scheduler(model_name, init_nodes_num)
-        self._ensure_completion_handler()
+        self.publish_cluster_status(reason="scheduler_run")
 
     def bootstrap_network(self, is_local_network=True):
         """
@@ -93,6 +93,7 @@ class SchedulerManage:
         self.is_local_network = is_local_network
         initial_peers, relay_servers = self._resolve_network_config(is_local_network)
         self._start_lattica(initial_peers, relay_servers)
+        self.publish_cluster_status(reason="network_bootstrap")
 
     def is_running(self):
         """
@@ -116,6 +117,7 @@ class SchedulerManage:
             # Wait a bit for threads to finish
             time.sleep(0.1)
             self.scheduler = None
+            self.scheduler_ready_event.clear()
             if hasattr(self, "connection_handler") and self.connection_handler is not None:
                 self.connection_handler.scheduler = None
             logger.debug("Scheduler stopped")
@@ -123,6 +125,7 @@ class SchedulerManage:
         # Note: We don't close Lattica here to allow model switching without restarting P2P
 
         logger.info("Scheduler stopped")
+        self.publish_cluster_status(reason="scheduler_stopped")
 
     def get_model_name(self):
         return self.model_name
@@ -158,10 +161,12 @@ class SchedulerManage:
         return self.scheduler.need_more_nodes() if self.scheduler else False
 
     def get_cluster_status(self):
+        self._prune_discovered_nodes()
         with self.cluster_status_lock:
             snapshot = copy.deepcopy(self.cluster_status_snapshot)
             generated_at = self.cluster_status_generated_at
             last_error = self.cluster_status_last_error
+            snapshot_version = self.cluster_status_version
 
         stale = (time.time() - generated_at) > 3.0
         data = snapshot.get("data", {})
@@ -172,8 +177,99 @@ class SchedulerManage:
             totals["snapshot_generated_at"] = time.strftime(
                 "%Y-%m-%dT%H:%M:%SZ", time.gmtime(generated_at)
             )
+        if isinstance(data, dict):
+            data["snapshot_version"] = snapshot_version
         data["last_snapshot_error"] = last_error
         return snapshot
+
+    def publish_cluster_status(
+        self, *, reason: str = "", force: bool = False, last_error: Optional[str] = None
+    ):
+        try:
+            snapshot = self._build_cluster_status_snapshot()
+            with self.cluster_status_condition:
+                self.cluster_status_snapshot = snapshot
+                self.cluster_status_generated_at = time.time()
+                self.cluster_status_last_error = last_error or ""
+                self.cluster_status_version += 1
+                self.cluster_status_condition.notify_all()
+        except Exception as error:
+            logger.warning(f"Failed to publish cluster status ({reason}): {error}")
+            with self.cluster_status_condition:
+                self.cluster_status_last_error = last_error or str(error)
+                if force or not self.cluster_status_snapshot:
+                    self.cluster_status_snapshot = self._empty_cluster_status_snapshot(
+                        snapshot_stale=True
+                    )
+                self.cluster_status_generated_at = time.time()
+                self.cluster_status_version += 1
+                self.cluster_status_condition.notify_all()
+
+    def wait_for_cluster_status_version(
+        self, previous_version: int, timeout: Optional[float] = None
+    ) -> Optional[Dict[str, Any]]:
+        self._prune_discovered_nodes()
+        with self.cluster_status_condition:
+            if self.cluster_status_version <= previous_version:
+                self.cluster_status_condition.wait(timeout=timeout)
+            if self.cluster_status_version <= previous_version:
+                return None
+            snapshot = copy.deepcopy(self.cluster_status_snapshot)
+            data = snapshot.get("data", {})
+            if isinstance(data, dict):
+                data["snapshot_version"] = self.cluster_status_version
+            return snapshot
+
+    def wait_for_scheduler_ready(self, timeout: Optional[float] = None) -> bool:
+        return self.scheduler_ready_event.wait(timeout=timeout)
+
+    def get_layer_allocation(self, node_id: str) -> Dict[str, Any]:
+        if self.scheduler is None:
+            return {}
+        list_node_allocations = self.scheduler.list_node_allocations()
+        for allocated_node_id, start_layer, end_layer in list_node_allocations:
+            if allocated_node_id != node_id:
+                continue
+            node = self.scheduler.get_node(node_id)
+            if node is None:
+                return {}
+            return {
+                "node_id": node_id,
+                "model_name": (
+                    node.model_info.model_name
+                    if node.hardware.device != "mlx"
+                    else node.model_info.mlx_model_name
+                ),
+                "start_layer": start_layer,
+                "end_layer": end_layer,
+                "tp_size": node.hardware.num_gpus,
+                "enable_weight_refit": self.scheduler.enable_weight_refit,
+                "weight_refit_mode": self.scheduler.weight_refit_mode,
+            }
+        return {}
+
+    def wait_for_node_allocation(
+        self, node_id: str, wait_seconds: float
+    ) -> Optional[Dict[str, Any]]:
+        deadline = time.time() + wait_seconds
+        last_seen_version = -1
+        while time.time() < deadline:
+            allocation = self.get_layer_allocation(node_id)
+            if allocation:
+                return allocation
+            remaining = max(0.0, deadline - time.time())
+            snapshot = self.wait_for_cluster_status_version(
+                last_seen_version, timeout=min(1.0, remaining)
+            )
+            if snapshot is None:
+                continue
+            data = snapshot.get("data", {})
+            if isinstance(data, dict):
+                last_seen_version = data.get("snapshot_version", last_seen_version)
+        return None
+
+    def on_scheduler_state_change(self, reason: str):
+        self.publish_cluster_status(reason=reason)
 
     def _get_pipeline_capacity_report(self):
         if self.scheduler is None:
@@ -194,6 +290,11 @@ class SchedulerManage:
             self._node_memory_gb(node) for node in discovered_nodes
         )
         if self.scheduler is None:
+            runtime = self._aggregate_cluster_runtime(
+                discovered_nodes,
+                discovered_memory_gb=discovered_memory_gb,
+                registered_memory_gb=0,
+            )
             return {
                 "nodes": discovered_nodes,
                 "pipelines": [],
@@ -209,6 +310,7 @@ class SchedulerManage:
                     "discovered_memory_gb": discovered_memory_gb,
                     "registered_memory_gb": 0,
                 },
+                "runtime": runtime,
             }
 
         node_manager = self.scheduler.node_manager
@@ -266,6 +368,11 @@ class SchedulerManage:
             self._node_memory_gb(node) for node in discovered_nodes
         )
         nodes.extend(discovered_nodes)
+        runtime = self._aggregate_cluster_runtime(
+            nodes,
+            discovered_memory_gb=discovered_memory_gb,
+            registered_memory_gb=registered_memory_gb,
+        )
 
         return {
             "nodes": nodes,
@@ -282,6 +389,7 @@ class SchedulerManage:
                 "discovered_memory_gb": discovered_memory_gb,
                 "registered_memory_gb": registered_memory_gb,
             },
+            "runtime": runtime,
         }
 
     def get_node_list(self):
@@ -301,15 +409,21 @@ class SchedulerManage:
         node_id = self._extract_node_id(node_payload)
         if not node_id:
             return
-        self.discovered_nodes[node_id] = {
+        previous_payload = self.discovered_nodes.get(node_id, {}).get("payload")
+        next_payload = {
             "payload": dict(node_payload),
             "last_seen": time.time(),
         }
+        changed = previous_payload != next_payload["payload"]
+        self.discovered_nodes[node_id] = next_payload
+        if changed:
+            self.publish_cluster_status(reason=f"discovered_node:{node_id}")
 
     def unregister_discovered_node(self, node_id: Optional[str]):
         if not node_id:
             return
-        self.discovered_nodes.pop(node_id, None)
+        if self.discovered_nodes.pop(node_id, None) is not None:
+            self.publish_cluster_status(reason=f"discovered_node_removed:{node_id}")
 
     def get_discovered_node_payloads(self, exclude_ids: Optional[set[str]] = None):
         self._prune_discovered_nodes()
@@ -330,8 +444,12 @@ class SchedulerManage:
             for node_id, entry in self.discovered_nodes.items()
             if entry.get("last_seen", 0) < cutoff
         ]
+        removed_any = False
         for node_id in stale_ids:
             self.discovered_nodes.pop(node_id, None)
+            removed_any = True
+        if removed_any:
+            self.publish_cluster_status(reason="discovered_node_pruned")
 
     def _extract_node_id(self, node_payload: Dict[str, Any]) -> Optional[str]:
         if not isinstance(node_payload, dict):
@@ -345,6 +463,146 @@ class SchedulerManage:
             if isinstance(hardware_node_id, str) and hardware_node_id:
                 return hardware_node_id
         return None
+
+    def _normalize_runtime_stage(self, runtime_payload: Dict[str, Any]) -> str:
+        stage = runtime_payload.get("init_stage")
+        if isinstance(stage, str) and stage:
+            return stage
+        status = runtime_payload.get("status")
+        if status == "ready":
+            return "ready"
+        if status in {"failed", "error"}:
+            return "failed"
+        if status in {"joining", "initializing"}:
+            return "allocating"
+        return "idle"
+
+    def _runtime_stage_priority(self, stage: str) -> int:
+        priorities = {
+            "failed": 0,
+            "loading-shards": 1,
+            "downloading": 2,
+            "resolving-metadata": 3,
+            "allocating": 4,
+            "rejoining-workers": 5,
+            "ready": 6,
+            "idle": 7,
+        }
+        return priorities.get(stage, 7)
+
+    def _runtime_snapshot_from_payload(
+        self, node_payload: Optional[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(node_payload, dict):
+            return None
+        runtime = node_payload.get("runtime")
+        if not isinstance(runtime, dict):
+            return None
+        return {
+            "status": runtime.get("status", "") or "",
+            "model_name": runtime.get("model_name", "") or "",
+            "init_stage": self._normalize_runtime_stage(runtime),
+            "init_detail": runtime.get("init_detail", "") or "",
+            "downloaded_files": runtime.get("downloaded_files"),
+            "total_files": runtime.get("total_files"),
+            "current_file": runtime.get("current_file", "") or "",
+            "updated_at": runtime.get("updated_at", "") or "",
+            "failure_reason": runtime.get("failure_reason", "") or "",
+        }
+
+    def _runtime_snapshot_for_node(self, node_id: str) -> Optional[Dict[str, Any]]:
+        payload = self.discovered_nodes.get(node_id, {}).get("payload")
+        if not isinstance(payload, dict):
+            return None
+        return self._runtime_snapshot_from_payload(payload)
+
+    def _aggregate_cluster_runtime(
+        self,
+        nodes: List[Dict[str, Any]],
+        *,
+        discovered_memory_gb: float,
+        registered_memory_gb: float,
+    ) -> Dict[str, Any]:
+        runtime_nodes = [
+            node
+            for node in nodes
+            if isinstance(node.get("runtime"), dict)
+            and (
+                node["runtime"].get("model_name")
+                or node["runtime"].get("init_stage")
+                or node["runtime"].get("init_detail")
+            )
+        ]
+        if not runtime_nodes:
+            return {"model_init": None}
+
+        min_priority = min(
+            self._runtime_stage_priority(node["runtime"].get("init_stage", "idle"))
+            for node in runtime_nodes
+        )
+        stage_candidates = [
+            node
+            for node in runtime_nodes
+            if self._runtime_stage_priority(node["runtime"].get("init_stage", "idle"))
+            == min_priority
+        ]
+        stage_node = max(
+            stage_candidates,
+            key=lambda node: node["runtime"].get("updated_at", ""),
+        )
+        most_recent_node = max(
+            runtime_nodes,
+            key=lambda node: node["runtime"].get("updated_at", ""),
+        )
+        counted_nodes = [
+            node
+            for node in runtime_nodes
+            if node["runtime"].get("downloaded_files") is not None
+            and node["runtime"].get("total_files") is not None
+        ]
+        if counted_nodes and len(counted_nodes) == len(runtime_nodes):
+            downloaded_files = sum(
+                int(node["runtime"].get("downloaded_files") or 0) for node in counted_nodes
+            )
+            total_files = sum(
+                int(node["runtime"].get("total_files") or 0) for node in counted_nodes
+            )
+        else:
+            downloaded_files = None
+            total_files = None
+
+        stage = stage_node["runtime"].get("init_stage", "idle") or "idle"
+        updated_at_values = [
+            node["runtime"].get("updated_at", "")
+            for node in runtime_nodes
+            if node["runtime"].get("updated_at")
+        ]
+        model_name = (
+            stage_node["runtime"].get("model_name")
+            or most_recent_node["runtime"].get("model_name")
+            or self.model_name
+            or ""
+        )
+        return {
+            "model_init": {
+                "active": stage not in {"idle", "ready", "failed"},
+                "stage": stage,
+                "model_name": model_name,
+                "required_memory_gb": None,
+                "discovered_memory_gb": discovered_memory_gb,
+                "registered_memory_gb": registered_memory_gb,
+                "derived_bootstrap_nodes": None,
+                "detail": stage_node["runtime"].get("init_detail", "") or "",
+                "started_at": min(updated_at_values) if updated_at_values else "",
+                "updated_at": most_recent_node["runtime"].get("updated_at", "") or "",
+                "downloaded_files": downloaded_files,
+                "total_files": total_files,
+                "current_file": most_recent_node["runtime"].get("current_file", "") or "",
+                "last_progress_at": most_recent_node["runtime"].get("updated_at", "") or "",
+                "failure_reason": stage_node["runtime"].get("failure_reason", "") or "",
+                "source_node_id": stage_node.get("node_id", "") or "",
+            }
+        }
 
     def build_node_info(
         self,
@@ -375,6 +633,7 @@ class SchedulerManage:
             "stage_index": stage_index,
             "is_active": node.is_active,
             "layer_latency_ms": None if latency_ms == float("inf") else latency_ms,
+            "runtime": self._runtime_snapshot_for_node(node.node_id),
         }
 
     def build_discovered_node_info(self, node_payload: Dict[str, Any]):
@@ -398,6 +657,7 @@ class SchedulerManage:
             "stage_index": None,
             "is_active": bool(node_payload.get("is_active", False)),
             "layer_latency_ms": node_payload.get("layer_latency_ms"),
+            "runtime": self._runtime_snapshot_from_payload(node_payload),
         }
 
     def _node_memory_gb(self, node_info: Dict[str, Any]) -> float:
@@ -444,12 +704,18 @@ class SchedulerManage:
                         "snapshot_stale": snapshot_stale,
                     },
                 },
+                "runtime": {
+                    "model_init": None,
+                },
             },
         }
 
     def _build_cluster_status_snapshot(self) -> Dict[str, Any]:
         per_pipeline_min, total_capacity, current_capacity = (
             self._get_pipeline_capacity_report()
+        )
+        topology = self.get_topology_snapshot(
+            per_pipeline_min, total_capacity, current_capacity
         )
         return {
             "type": "cluster_status",
@@ -467,29 +733,10 @@ class SchedulerManage:
                 "need_more_nodes": self.need_more_nodes(),
                 "max_running_request": total_capacity,
                 "last_snapshot_error": "",
-                "topology": self.get_topology_snapshot(
-                    per_pipeline_min, total_capacity, current_capacity
-                ),
+                "topology": topology,
+                "runtime": topology.get("runtime", {"model_init": None}),
             },
         }
-
-    def _cluster_status_refresh_loop(self):
-        while True:
-            try:
-                snapshot = self._build_cluster_status_snapshot()
-                with self.cluster_status_lock:
-                    self.cluster_status_snapshot = snapshot
-                    self.cluster_status_generated_at = time.time()
-                    self.cluster_status_last_error = ""
-            except Exception as error:
-                logger.warning(f"Failed to refresh cached cluster status: {error}")
-                with self.cluster_status_lock:
-                    self.cluster_status_last_error = str(error)
-                    if not self.cluster_status_snapshot:
-                        self.cluster_status_snapshot = self._empty_cluster_status_snapshot(
-                            snapshot_stale=True
-                        )
-            time.sleep(1)
 
     def _start_scheduler(self, model_name, init_nodes_num):
         """
@@ -512,7 +759,9 @@ class SchedulerManage:
             min_nodes_bootstrapping=init_nodes_num,
             enable_weight_refit=self.enable_weight_refit,
             weight_refit_mode=self.weight_refit_mode,
+            state_change_callback=self.on_scheduler_state_change,
         )
+        self.scheduler_ready_event.set()
         if hasattr(self, "connection_handler") and self.connection_handler is not None:
             self.connection_handler.scheduler = self.scheduler
 
@@ -526,6 +775,7 @@ class SchedulerManage:
         ).start()
         logger.debug("Scheduler background thread started (poll_interval=0.05)")
         logger.info("Nodes will automatically rejoin via heartbeat (node_update) mechanism")
+        self.publish_cluster_status(reason="scheduler_started")
 
     def _resolve_network_config(self, is_local_network: bool):
         initial_peers = list(self.configured_initial_peers)
@@ -556,31 +806,10 @@ class SchedulerManage:
             logger.warning(f"Failed to close Lattica cleanly: {e}")
         self.lattica = None
         self.connection_handler = None
-        self.completion_handler = None
         self.network_signature = None
         self.stubs = {}
         self.discovered_nodes = {}
-
-    def _ensure_completion_handler(self):
-        """
-        Register the scheduler-side completion RPC service only once per Lattica node.
-
-        Re-registering a new TransformerConnectionHandler on every model init can wedge the
-        Python process in Lattica service registration and stall the HTTP API.
-        """
-        if self.lattica is None:
-            return
-        if self.completion_handler is not None:
-            logger.debug("Reusing existing TransformerConnectionHandler")
-            return
-        logger.debug("Registering TransformerConnectionHandler on scheduler Lattica node")
-        self.completion_handler = TransformerConnectionHandler(
-            lattica=self.lattica,
-            recv_from_peer_addr="",
-            send_to_peer_addr="",
-            block_start_index=0,
-            block_end_index=1,
-        )
+        self.publish_cluster_status(reason="lattica_stopped")
 
     def _start_lattica(self, initial_peers: List[str], relay_servers: List[str]):
         """
@@ -611,6 +840,7 @@ class SchedulerManage:
                 )
                 logger.debug("Created connection handler with existing Lattica")
             self.connection_handler.scheduler_manage = self
+            self.publish_cluster_status(reason="lattica_reused")
             return
 
         logger.debug(
@@ -675,6 +905,7 @@ class SchedulerManage:
             scheduler_manage=self,
         )
         logger.debug("RPCConnectionHandler initialized")
+        self.publish_cluster_status(reason="lattica_started")
 
     def get_routing_table(self, request_id, received_ts):
         """Block briefly until the scheduler assigns a routing path for the request.

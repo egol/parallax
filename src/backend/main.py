@@ -236,9 +236,17 @@ async def node_join_command():
 @app.get("/cluster/status")
 async def cluster_status():
     async def stream_cluster_status():
+        snapshot = scheduler_manage.get_cluster_status()
+        yield json.dumps(snapshot, ensure_ascii=False) + "\n"
+        version = snapshot.get("data", {}).get("snapshot_version", 0)
         while True:
-            yield json.dumps(scheduler_manage.get_cluster_status(), ensure_ascii=False) + "\n"
-            await asyncio.sleep(1)
+            next_snapshot = await asyncio.to_thread(
+                scheduler_manage.wait_for_cluster_status_version, version, 30.0
+            )
+            if next_snapshot is None:
+                continue
+            version = next_snapshot.get("data", {}).get("snapshot_version", version)
+            yield json.dumps(next_snapshot, ensure_ascii=False) + "\n"
 
     return StreamingResponse(
         stream_cluster_status(),
