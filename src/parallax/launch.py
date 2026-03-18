@@ -31,6 +31,10 @@ from parallax_utils.version_check import check_latest_release
 
 logger = get_logger("parallax.launch")
 
+SCHEDULER_STANDBY_DETAIL = (
+    "Connected to scheduler discovery; waiting for model start or layer allocation."
+)
+
 
 def _update_args_from_shared_state(args, shared_state: SharedState, force_update: bool):
     """Update args with layer allocation from shared state"""
@@ -148,6 +152,25 @@ def _wait_worker_check_layer_change(p2p_server_process, shared_state: SharedStat
     return shared_state.get_layer_allocation_changed()
 
 
+def _scheduler_allocation_ready(shared_state: SharedState) -> bool:
+    model_info = shared_state.get_model_info()
+    return (
+        model_info["block_start_index"] is not None
+        and model_info["block_end_index"] is not None
+        and model_info["model_name"] is not None
+    )
+
+
+def _wait_for_scheduler_layer_allocation(p2p_server_process, shared_state: SharedState) -> None:
+    logger.debug("Waiting for layer allocation from scheduler...")
+    while True:
+        if _scheduler_allocation_ready(shared_state):
+            return
+        if p2p_server_process is not None and not p2p_server_process.is_alive():
+            raise RuntimeError("Parallax worker stopped before receiving layer allocation")
+        time.sleep(1)
+
+
 if __name__ == "__main__":
     multiprocessing.set_start_method("spawn", force=True)
 
@@ -160,8 +183,8 @@ if __name__ == "__main__":
     shared_state.set_status(ServerState.JOINING.value)
     shared_state.update_runtime_state(
         status=ServerState.JOINING.value,
-        init_stage="allocating",
-        init_detail="Waiting for scheduler layer allocation.",
+        init_stage="idle",
+        init_detail=SCHEDULER_STANDBY_DETAIL,
         failure_reason="",
     )
 
@@ -284,28 +307,7 @@ if __name__ == "__main__":
                 conn=conn_main,
             )
 
-            # Wait for layer allocation from scheduler (via shared state)
-            logger.debug("Waiting for layer allocation from scheduler...")
-            max_wait_time = 300  # 5 minutes
-            wait_start = time.time()
-            while True:
-                model_info = shared_state.get_model_info()
-                if (
-                    model_info["block_start_index"] is not None
-                    and model_info["block_end_index"] is not None
-                    and model_info["model_name"] is not None
-                ):
-                    break
-                if time.time() - wait_start > max_wait_time:
-                    logger.error("Timeout waiting for layer allocation from scheduler")
-                    shared_state.update_runtime_state(
-                        status=ServerState.JOINING.value,
-                        init_stage="failed",
-                        init_detail="Timed out waiting for layer allocation from the scheduler.",
-                        failure_reason="Failed to get layer allocation from scheduler",
-                    )
-                    raise RuntimeError("Failed to get layer allocation from scheduler")
-                time.sleep(1)
+            _wait_for_scheduler_layer_allocation(p2p_server_process, shared_state)
 
             # Get layer allocation from shared state
             _update_args_from_shared_state(args, shared_state, force_update=False)

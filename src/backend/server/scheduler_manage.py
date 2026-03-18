@@ -57,16 +57,13 @@ class SchedulerManage:
         self.is_local_network = False
         self.network_signature = None
         self.discovered_nodes: Dict[str, Dict[str, Any]] = {}
-        # A worker's initial node_join blocks until allocation is assigned, and the
-        # heartbeat updater does not start until after that returns. Keep discovered
-        # nodes alive long enough for scheduler init/bootstrap to finish on first join.
+        # Workers can now sit in a discovered standby state before model start, so keep
+        # discovered nodes alive long enough for scheduler init/bootstrap to assign them.
         self.discovered_node_ttl_seconds = 360.0
         self.cluster_status_lock = threading.Lock()
         self.cluster_status_condition = threading.Condition(self.cluster_status_lock)
         self.cluster_status_last_error = ""
-        self.cluster_status_snapshot = self._empty_cluster_status_snapshot(
-            snapshot_stale=False
-        )
+        self.cluster_status_snapshot = self._empty_cluster_status_snapshot(snapshot_stale=False)
         self.cluster_status_generated_at = time.time()
         self.cluster_status_version = 0
         self.scheduler_ready_event = threading.Event()
@@ -283,12 +280,9 @@ class SchedulerManage:
         current_capacity: int,
     ) -> Dict[str, Any]:
         discovered_nodes = [
-            self.build_discovered_node_info(node)
-            for node in self.get_discovered_node_payloads()
+            self.build_discovered_node_info(node) for node in self.get_discovered_node_payloads()
         ]
-        discovered_memory_gb = sum(
-            self._node_memory_gb(node) for node in discovered_nodes
-        )
+        discovered_memory_gb = sum(self._node_memory_gb(node) for node in discovered_nodes)
         if self.scheduler is None:
             runtime = self._aggregate_cluster_runtime(
                 discovered_nodes,
@@ -324,7 +318,9 @@ class SchedulerManage:
         for pipeline_id, pipeline in sorted(registered_pipelines.items()):
             pipeline.recompute_capacity()
             min_capacity, remaining_capacity = (
-                per_pipeline_min.get(pipeline_id, (pipeline.min_node_capacity, pipeline.min_remaining_capacity))
+                per_pipeline_min.get(
+                    pipeline_id, (pipeline.min_node_capacity, pipeline.min_remaining_capacity)
+                )
                 if per_pipeline_min is not None
                 else (pipeline.min_node_capacity, pipeline.min_remaining_capacity)
             )
@@ -364,9 +360,7 @@ class SchedulerManage:
             self.build_discovered_node_info(node)
             for node in self.get_discovered_node_payloads(exclude_ids=set(node_lookup))
         ]
-        discovered_memory_gb = sum(
-            self._node_memory_gb(node) for node in discovered_nodes
-        )
+        discovered_memory_gb = sum(self._node_memory_gb(node) for node in discovered_nodes)
         nodes.extend(discovered_nodes)
         runtime = self._aggregate_cluster_runtime(
             nodes,
@@ -516,6 +510,20 @@ class SchedulerManage:
             return None
         return self._runtime_snapshot_from_payload(payload)
 
+    def _runtime_contributes_to_cluster_model_init(self, runtime: Optional[Dict[str, Any]]) -> bool:
+        if not isinstance(runtime, dict):
+            return False
+        if runtime.get("model_name"):
+            return True
+
+        stage = runtime.get("init_stage", "idle") or "idle"
+        if not self.model_name:
+            return False
+
+        return stage != "idle" or any(
+            runtime.get(field) for field in ("current_file", "failure_reason")
+        )
+
     def _aggregate_cluster_runtime(
         self,
         nodes: List[Dict[str, Any]],
@@ -526,12 +534,7 @@ class SchedulerManage:
         runtime_nodes = [
             node
             for node in nodes
-            if isinstance(node.get("runtime"), dict)
-            and (
-                node["runtime"].get("model_name")
-                or node["runtime"].get("init_stage")
-                or node["runtime"].get("init_detail")
-            )
+            if self._runtime_contributes_to_cluster_model_init(node.get("runtime"))
         ]
         if not runtime_nodes:
             return {"model_init": None}
@@ -624,11 +627,11 @@ class SchedulerManage:
             "end_layer": node.end_layer,
             "current_requests": node.current_requests,
             "max_requests": node.max_requests,
-            "assigned_request_count": self.scheduler.node_manager.node_assigned_request_count.get(
-                node.node_id, 0
-            )
-            if self.scheduler
-            else 0,
+            "assigned_request_count": (
+                self.scheduler.node_manager.node_assigned_request_count.get(node.node_id, 0)
+                if self.scheduler
+                else 0
+            ),
             "pipeline_id": pipeline_id,
             "stage_index": stage_index,
             "is_active": node.is_active,
@@ -711,12 +714,8 @@ class SchedulerManage:
         }
 
     def _build_cluster_status_snapshot(self) -> Dict[str, Any]:
-        per_pipeline_min, total_capacity, current_capacity = (
-            self._get_pipeline_capacity_report()
-        )
-        topology = self.get_topology_snapshot(
-            per_pipeline_min, total_capacity, current_capacity
-        )
+        per_pipeline_min, total_capacity, current_capacity = self._get_pipeline_capacity_report()
+        topology = self.get_topology_snapshot(per_pipeline_min, total_capacity, current_capacity)
         return {
             "type": "cluster_status",
             "data": {
@@ -786,9 +785,7 @@ class SchedulerManage:
             relay_servers = list(PUBLIC_RELAY_SERVERS)
         return initial_peers, relay_servers
 
-    def _network_signature_for(
-        self, initial_peers: List[str], relay_servers: List[str]
-    ) -> tuple:
+    def _network_signature_for(self, initial_peers: List[str], relay_servers: List[str]) -> tuple:
         return (
             self.is_local_network,
             tuple(initial_peers),

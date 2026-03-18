@@ -32,6 +32,10 @@ from parallax_utils.logging_config import get_logger, set_log_level
 
 logger = get_logger(__name__)
 
+SCHEDULER_STANDBY_DETAIL = (
+    "Connected to scheduler discovery; waiting for model start or layer allocation."
+)
+
 # Global HTTP client for reuse
 _http_client = None
 
@@ -462,9 +466,7 @@ class GradientServer:
             normalized = normalized.rstrip("/")
             parts = [part for part in normalized.split("/") if part]
             if len(parts) < 2 or parts[-2] != "p2p" or not parts[-1]:
-                raise ValueError(
-                    "scheduler_addr multiaddr must end with /p2p/<scheduler-peer-id>"
-                )
+                raise ValueError("scheduler_addr multiaddr must end with /p2p/<scheduler-peer-id>")
             return [normalized], parts[-1]
 
         if "/" in normalized:
@@ -587,7 +589,27 @@ class GradientServer:
                     response = self.scheduler_stub.node_join(node_info)
                     response = response.result(timeout=300)
                     if response == {}:
-                        raise RuntimeError("Failed to join scheduler")
+                        logger.info(
+                            "Scheduler has not assigned layers yet; node will stay in standby "
+                            "discovery mode until model start."
+                        )
+                        self.status = ServerState.JOINING
+                        self.block_start_index = None
+                        self.block_end_index = None
+                        self.model_name = None
+                        self._sync_to_shared_state()
+                        if self._shared_state is not None:
+                            self._shared_state.update_runtime_state(
+                                status=self.status.value,
+                                model_name=None,
+                                init_stage="idle",
+                                init_detail=SCHEDULER_STANDBY_DETAIL,
+                                downloaded_files=None,
+                                total_files=None,
+                                current_file="",
+                                failure_reason="",
+                            )
+                        break
 
                     logger.info(f"Join scheduler response: {response}")
 
@@ -906,8 +928,8 @@ class GradientServer:
                                     self._shared_state.update_runtime_state(
                                         status=self.status.value,
                                         model_name=None,
-                                        init_stage="allocating",
-                                        init_detail="Waiting for scheduler layer allocation.",
+                                        init_stage="idle",
+                                        init_detail=SCHEDULER_STANDBY_DETAIL,
                                         downloaded_files=None,
                                         total_files=None,
                                         current_file="",
@@ -1150,12 +1172,8 @@ def _run_p2p_server_process(
             shared_state.update_runtime_state(
                 status=server.status.value,
                 model_name=server.model_name,
-                init_stage="allocating" if scheduler_addr is not None else "idle",
-                init_detail=(
-                    "Waiting for scheduler layer allocation."
-                    if scheduler_addr is not None
-                    else ""
-                ),
+                init_stage="idle",
+                init_detail=SCHEDULER_STANDBY_DETAIL if scheduler_addr is not None else "",
                 downloaded_files=None,
                 total_files=None,
                 current_file="",

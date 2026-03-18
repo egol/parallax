@@ -49,12 +49,14 @@ class RPCConnectionHandler(ConnectionHandler):
         if self.scheduler_manage is not None:
             self.scheduler_manage.register_discovered_node(message)
         if self.scheduler is None:
-            if self.scheduler_manage is None or not self.scheduler_manage.wait_for_scheduler_ready(
-                timeout=300
-            ):
-                logger.warning("Timed out waiting for scheduler readiness during node_join")
+            if self.scheduler_manage is not None:
+                self.scheduler = self.scheduler_manage.scheduler
+            if self.scheduler is None:
+                logger.info(
+                    "Scheduler is not initialized yet during node_join; "
+                    "keeping node discovered in standby mode until model start."
+                )
                 return {}
-            self.scheduler = self.scheduler_manage.scheduler
         try:
             node = self.build_node(message)
             self.scheduler.enqueue_join(node)
