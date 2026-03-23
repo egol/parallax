@@ -203,6 +203,74 @@ recovers without wedging.
 real-model lane, then adds a process-level worker kill/restart so both
 container-level and process-level reconnect behavior are covered.
 
+## Network Condition Testing
+
+The localnet harness includes network simulation scripts that use Linux
+`tc` (traffic control) and `iptables` to inject latency, packet loss,
+bandwidth constraints, and network partitions into the Docker containers.
+
+All containers have `cap_add: [NET_ADMIN]` and the image includes
+`iproute2` and `iptables`.
+
+### Smoke Tests
+
+Latency injection (200ms + 500ms on workers, verify chat still works):
+
+```bash
+./parallax/docker/run_nettest_latency_smoke.sh
+```
+
+Network partition (iptables DROP on worker1, verify detection + recovery):
+
+```bash
+./parallax/docker/run_nettest_partition_smoke.sh
+```
+
+Bandwidth constraint (256kbit on workers, verify chat still works):
+
+```bash
+./parallax/docker/run_nettest_bandwidth_smoke.sh
+```
+
+Combined conditions + chaos (latency + loss + container stop/restart):
+
+```bash
+./parallax/docker/run_nettest_combined_chaos.sh
+```
+
+### Benchmark with Plots
+
+Run the full benchmark across multiple conditions and generate matplotlib
+plots of latency, throughput, TTFT, and node-to-node RTT:
+
+```bash
+./parallax/docker/run_nettest_benchmark.sh
+```
+
+Benchmark results are saved to `/tmp/parallax-nettest-benchmark/`. If
+matplotlib is installed on the host, plots are generated automatically.
+Otherwise, generate them manually:
+
+```bash
+python3 parallax/docker/plot_nettest.py \
+  --input /tmp/parallax-nettest-benchmark/benchmark-results.json \
+  --output /tmp/parallax-nettest-benchmark/plots/
+```
+
+Environment variables:
+- `PARALLAX_NETTEST_NUM_REQUESTS` — requests per condition (default: 20)
+- `PARALLAX_LOCALNET_KEEP_RUNNING` — set to `1` to keep containers after test
+- `PARALLAX_LOCALNET_ARTIFACT_DIR` — override artifact output directory
+
+### Shared Libraries
+
+The nettest scripts use two shared libraries:
+
+- `lib_localnet.sh` — common compose, wait, and bootstrap helpers
+- `lib_nettest.sh` — tc/iptables wrappers for network simulation
+
+These are also available for ad-hoc use in interactive Docker sessions.
+
 ## Shutdown
 
 ```bash

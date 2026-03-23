@@ -6,7 +6,7 @@ ENV PARALLAX_TEST_MODE=1
 ENV SGLANG_ENABLE_JIT_DEEPGEMM=0
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && apt-get install -y --no-install-recommends curl ca-certificates iproute2 iptables iputils-ping \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /parallax
@@ -15,6 +15,7 @@ COPY README.md ./README.md
 COPY pyproject.toml ./pyproject.toml
 COPY src ./src
 COPY docker/test-models ./docker/test-models
+COPY docker/bench_collect.py ./docker/bench_collect.py
 
 RUN pip install --upgrade pip setuptools wheel \
     && pip install torch \

@@ -10,6 +10,7 @@ services:
     working_dir: /parallax
     tty: true
     stdin_open: true
+    cap_add: [NET_ADMIN]
     environment:
       PARALLAX_TEST_MODE: "1"
     hostname: host
@@ -25,6 +26,7 @@ services:
     working_dir: /parallax
     tty: true
     stdin_open: true
+    cap_add: [NET_ADMIN]
     environment:
       PARALLAX_TEST_MODE: "1"
     hostname: worker1
@@ -41,6 +43,7 @@ services:
     working_dir: /parallax
     tty: true
     stdin_open: true
+    cap_add: [NET_ADMIN]
     environment:
       PARALLAX_TEST_MODE: "1"
     hostname: worker2
