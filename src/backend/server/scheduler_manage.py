@@ -1,4 +1,5 @@
 import copy
+import os
 import threading
 import time
 from typing import Any, Dict, List, Optional
@@ -14,6 +15,14 @@ from scheduling.node import RequestSignal
 from scheduling.scheduler import Scheduler
 
 logger = get_logger(__name__)
+
+
+def resolve_lattica_key_path(default: Optional[str] = None) -> Optional[str]:
+    key_path = os.getenv("PARALLAX_LATTICA_KEY_PATH", "").strip()
+    if key_path:
+        os.makedirs(key_path, exist_ok=True)
+        return key_path
+    return default
 
 
 class SchedulerManage:
@@ -846,7 +855,10 @@ class SchedulerManage:
         logger.debug(
             f"Starting Lattica with host_maddrs={self.host_maddrs}, mdns=False, dht_prefix={self.dht_prefix}"
         )
-        self.lattica = Lattica.builder().with_listen_addrs(self.host_maddrs).with_key_path(".")
+        key_path = resolve_lattica_key_path(".")
+        self.lattica = Lattica.builder().with_listen_addrs(self.host_maddrs).with_key_path(
+            key_path
+        )
         self.network_signature = signature
 
         if len(relay_servers) > 0:

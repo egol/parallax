@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import time
 from typing import Dict, List, Optional
 
@@ -20,6 +21,14 @@ from parallax_utils.logging_config import get_logger
 logger = get_logger(__name__)
 
 import uuid
+
+
+def resolve_lattica_key_path(default: Optional[str] = None) -> Optional[str]:
+    key_path = os.getenv("PARALLAX_LATTICA_KEY_PATH", "").strip()
+    if key_path:
+        os.makedirs(key_path, exist_ok=True)
+        return key_path
+    return default
 
 # Fast API
 app = fastapi.FastAPI(
@@ -140,6 +149,9 @@ class NodeChatHttpServer:
 
     def build_lattica(self):
         self.lattica = Lattica.builder().with_listen_addrs(self.host_maddrs)
+        key_path = resolve_lattica_key_path()
+        if key_path is not None:
+            self.lattica.with_key_path(key_path)
 
         try:
             scheduler_bootstraps, self.scheduler_peer_id = self._parse_scheduler_target(
