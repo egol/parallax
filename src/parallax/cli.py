@@ -19,6 +19,7 @@ import requests
 
 from parallax_utils.file_util import get_project_root
 from parallax_utils.logging_config import get_logger
+from parallax_utils.runtime_compat import popen_session_kwargs, terminate_process_tree
 from parallax_utils.version_check import get_current_version
 
 logger = get_logger("parallax.cli")
@@ -100,8 +101,7 @@ def _execute_with_graceful_shutdown(cmd: list[str], env: dict[str, str] | None =
 
     sub_process = None
     try:
-        # Start in a new session so we can signal the entire process group
-        sub_process = subprocess.Popen(cmd, env=env, start_new_session=True)
+        sub_process = subprocess.Popen(cmd, env=env, **popen_session_kwargs())
         # Wait for the subprocess to finish
         return_code = sub_process.wait()
         if return_code != 0:
@@ -113,12 +113,9 @@ def _execute_with_graceful_shutdown(cmd: list[str], env: dict[str, str] | None =
         # If another Ctrl-C arrives during cleanup, force-kill the whole group immediately
         def _force_kill_handler(signum, frame):
             try:
-                os.killpg(sub_process.pid, signal.SIGKILL)
+                terminate_process_tree(sub_process, grace_seconds=0.0)
             except Exception:
-                try:
-                    sub_process.kill()
-                except Exception:
-                    pass
+                pass
             os._exit(130)
 
         try:
@@ -129,32 +126,7 @@ def _execute_with_graceful_shutdown(cmd: list[str], env: dict[str, str] | None =
         if sub_process is not None:
             try:
                 logger.info("Terminating subprocess group...")
-                # Gracefully terminate the entire process group
-                try:
-                    os.killpg(sub_process.pid, signal.SIGINT)
-                except Exception:
-                    # Fall back to signaling just the child process
-                    sub_process.send_signal(signal.SIGINT)
-
-                logger.info("Waiting for subprocess to exit...")
-                # Wait for the subprocess to exit gracefully
-                try:
-                    sub_process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    logger.info("SIGINT timeout; sending SIGTERM to process group...")
-                    try:
-                        os.killpg(sub_process.pid, signal.SIGTERM)
-                    except Exception:
-                        sub_process.terminate()
-                    try:
-                        sub_process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        logger.info("SIGTERM timeout; forcing SIGKILL on process group...")
-                        try:
-                            os.killpg(sub_process.pid, signal.SIGKILL)
-                        except Exception:
-                            sub_process.kill()
-                        sub_process.wait()
+                terminate_process_tree(sub_process)
                 logger.info("Subprocess exited.")
             except Exception as e:
                 logger.error(f"Failed to terminate subprocess: {e}")

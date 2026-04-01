@@ -24,15 +24,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE_FILE="$SCRIPT_DIR/docker-compose.localnet.yml"
 KEEP_RUNNING="${PARALLAX_LOCALNET_KEEP_RUNNING:-0}"
 RESET_VOLUMES="${PARALLAX_LOCALNET_RESET_VOLUMES:-0}"
-MODEL_PATH="${PARALLAX_NETTEST_MODEL:-sshleifer/tiny-gpt2}"
+PARALLAX_LOCALNET_INIT_NODES="${PARALLAX_LOCALNET_INIT_NODES:-3}"
+MODEL_PATH="${PARALLAX_NETTEST_MODEL:-Qwen/Qwen2.5-0.5B-Instruct}"
 SCHEDULER_LOG="/tmp/parallax-run.log"
 CHAT_LOG="/tmp/parallax-chat.log"
 ARTIFACT_DIR="${PARALLAX_LOCALNET_ARTIFACT_DIR:-/tmp/parallax-nettest-benchmark}"
 NUM_REQUESTS="${PARALLAX_NETTEST_NUM_REQUESTS:-10}"
 PROMPT="${PARALLAX_NETTEST_PROMPT:-What color is the sky?}"
+PARALLAX_LOCALNET_READY_TIMEOUT="${PARALLAX_LOCALNET_READY_TIMEOUT:-300}"
 
+export PARALLAX_LOCALNET_TEST_MODE="${PARALLAX_LOCALNET_TEST_MODE:-0}"
 # Workers use the transformers runtime for real (CPU) inference
-export WORKER_ENV="PARALLAX_TEST_RUNTIME=transformers"
+export WORKER_ENV="PARALLAX_TEST_RUNTIME=transformers PARALLAX_TEST_OVERRIDE_MEMORY_GB=${PARALLAX_TEST_OVERRIDE_MEMORY_GB:-0.7}"
+WORKER_JOIN_ARGS="${WORKER_JOIN_ARGS:---kv-cache-memory-fraction 0.45 --max-total-tokens 4096 --max-sequence-length 1024 --max-batch-size 2 --max-num-tokens-per-batch 512}"
 
 source "$SCRIPT_DIR/lib_localnet.sh"
 source "$SCRIPT_DIR/lib_nettest.sh"
@@ -72,28 +76,8 @@ benchmark_condition() {
 echo "=== Parallax nettest: benchmark (real model: $MODEL_PATH) ==="
 
 # Boot cluster — uses real model via WORKER_ENV
-if [[ "$RESET_VOLUMES" == "1" ]]; then
-  compose down -v >/dev/null 2>&1 || true
-else
-  compose down >/dev/null 2>&1 || true
-fi
-compose up -d --build
-
-start_scheduler
-start_worker_join worker1 3101 4101 5101 "$scheduler_addr"
-start_worker_join worker2 3102 4102 5102 "$scheduler_addr"
-wait_status "len(data.get('node_list', [])) >= 2" 60 >/dev/null
-
-# Init with real model (longer timeout for download + CPU loading)
-echo "--- initializing model: $MODEL_PATH ---"
-compose exec -T host curl -sS -X POST http://127.0.0.1:3301/scheduler/init \
-  -H 'Content-Type: application/json' \
-  -d "{\"model_name\":\"$MODEL_PATH\",\"init_nodes_num\":2,\"is_local_network\":true}" >/dev/null
-
-wait_status "data.get('initialized') is True" 120 >/dev/null
-wait_status "data.get('status') == 'available' and data.get('topology', {}).get('totals', {}).get('ready_pipelines', 0) >= 1" 120 >/dev/null
-
-start_chat_proxy
+boot_full_cluster
+echo "$(validate_split_topology "$PARALLAX_LOCALNET_INIT_NODES")"
 
 # Verify real model produces actual text
 echo "--- verifying real model output ---"
@@ -146,34 +130,41 @@ benchmark_condition "baseline"
 
 # 2. Latency sweep
 for delay in 50 100 200 500; do
-  inject_latency worker1 "$delay"
-  inject_latency worker2 "$delay"
+  for worker in "${WORKER_SERVICES[@]}"; do
+    inject_latency "$worker" "$delay"
+  done
   benchmark_condition "latency-${delay}ms"
-  clear_tc worker1
-  clear_tc worker2
+  for worker in "${WORKER_SERVICES[@]}"; do
+    clear_tc "$worker"
+  done
 done
 
 # 3. Packet loss sweep
 for loss in 1 5 10; do
-  inject_packet_loss worker1 "$loss"
-  inject_packet_loss worker2 "$loss"
+  for worker in "${WORKER_SERVICES[@]}"; do
+    inject_packet_loss "$worker" "$loss"
+  done
   benchmark_condition "loss-${loss}pct"
-  clear_tc worker1
-  clear_tc worker2
+  for worker in "${WORKER_SERVICES[@]}"; do
+    clear_tc "$worker"
+  done
 done
 
 # 4. Bandwidth sweep
 for bw in 1024 512 256 128; do
-  limit_bandwidth worker1 "$bw"
-  limit_bandwidth worker2 "$bw"
+  for worker in "${WORKER_SERVICES[@]}"; do
+    limit_bandwidth "$worker" "$bw"
+  done
   benchmark_condition "bandwidth-${bw}kbit"
-  clear_tc worker1
-  clear_tc worker2
+  for worker in "${WORKER_SERVICES[@]}"; do
+    clear_tc "$worker"
+  done
 done
 
 # 5. Combined conditions
-inject_conditions worker1 100 2
-inject_conditions worker2 100 2
+for worker in "${WORKER_SERVICES[@]}"; do
+  inject_conditions "$worker" 100 2
+done
 benchmark_condition "combined-100ms-2pct"
 clear_all_network_conditions
 

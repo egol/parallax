@@ -17,6 +17,7 @@ from starlette.datastructures import State
 from backend.server.rpc_connection_handler import RPCConnectionHandler
 from parallax_utils.file_util import get_project_root
 from parallax_utils.logging_config import get_logger
+from parallax_utils.runtime_compat import bundled_frontend_path, uvicorn_loop_name
 
 logger = get_logger(__name__)
 
@@ -79,7 +80,7 @@ async def cluster_status():
 # Disable caching for index.html
 @app.get("/")
 async def serve_index():
-    response = FileResponse(str(get_project_root()) + "/src/frontend/dist/chat.html")
+    response = FileResponse(bundled_frontend_path(get_project_root(), "chat.html"))
     # Disable cache
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     response.headers["Pragma"] = "no-cache"
@@ -352,7 +353,7 @@ class NodeChatHttpServer:
             host=self.host,
             port=self.port,
             timeout_keep_alive=5,
-            loop="uvloop",
+            loop=uvicorn_loop_name(),
         )
         server = uvicorn.Server(config)
         await server.serve()

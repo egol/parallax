@@ -24,8 +24,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import zmq
 from jinja2 import TemplateError
-from mlx_lm.server import convert_chat, process_message_content
 
+from parallax.utils.hf_compat import convert_chat, process_message_content
 from parallax.p2p.message_util import (
     abort_request_to_proto,
     proto_to_abort_request,
@@ -310,8 +310,9 @@ class BaseExecutor:
                                         logger.debug(
                                             f"Converting hidden_states dtype from {req.hidden_states.dtype} to {self.dtype} for request {req.request_id}"
                                         )
-                                        if self.device is not None and self.device.startswith(
-                                            "cuda"
+                                        if self.device is not None and (
+                                            self.device.startswith("cuda")
+                                            or self.device == "cpu"
                                         ):
                                             req.hidden_states = req.hidden_states.to(self.dtype)
                                         elif self.device == "mlx":

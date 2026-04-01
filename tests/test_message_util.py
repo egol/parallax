@@ -2,9 +2,10 @@
 Test the message utility functions.
 """
 
-import mlx.core as mx
 import numpy as np
 import pytest
+
+mx = pytest.importorskip("mlx.core")
 
 from parallax.p2p.message_util import (
     abort_request_to_proto,

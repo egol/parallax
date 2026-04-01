@@ -19,7 +19,6 @@ python src/parallax/launch.py \
 import argparse
 import multiprocessing
 import os
-import tempfile
 import time
 
 from parallax.p2p.server import ServerState, launch_p2p_server_process, stop_p2p_server
@@ -27,6 +26,7 @@ from parallax.server.server_args import parse_args
 from parallax.utils.shared_state import SharedState
 from parallax_utils.ascii_anime import display_parallax_join
 from parallax_utils.logging_config import get_logger, set_log_level
+from parallax_utils.runtime_compat import local_zmq_endpoint
 from parallax_utils.version_check import check_latest_release
 
 logger = get_logger("parallax.launch")
@@ -170,10 +170,10 @@ if __name__ == "__main__":
         test_mode = _is_test_mode()
         set_log_level(args.log_level)
         logger.debug(f"args: {args}")
-        args.recv_from_peer_addr = f"ipc://{tempfile.NamedTemporaryFile().name}"
-        args.send_to_peer_addr = f"ipc://{tempfile.NamedTemporaryFile().name}"
-        args.executor_input_ipc = f"ipc://{tempfile.NamedTemporaryFile().name}"
-        args.executor_output_ipc = f"ipc://{tempfile.NamedTemporaryFile().name}"
+        args.recv_from_peer_addr = local_zmq_endpoint("parallax-recv-peer")
+        args.send_to_peer_addr = local_zmq_endpoint("parallax-send-peer")
+        args.executor_input_ipc = local_zmq_endpoint("parallax-executor-in")
+        args.executor_output_ipc = local_zmq_endpoint("parallax-executor-out")
         if args.nccl_port is None:
             from parallax.utils.utils import initialize_nccl_port
 

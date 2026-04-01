@@ -10,20 +10,12 @@ from concurrent.futures import Future
 from threading import Thread
 from typing import Awaitable
 
-import uvloop
+from parallax_utils.runtime_compat import create_event_loop
 
 
 def switch_to_uvloop() -> asyncio.AbstractEventLoop:
     """stop any running event loops; install uvloop; then create, set and return a new event loop"""
-    try:
-        # if we're in jupyter, get rid of its built-in event loop
-        asyncio.get_event_loop().stop()
-    except RuntimeError:
-        pass  # this allows running DHT from background threads with no event loop
-    uvloop.install()
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    return loop
+    return create_event_loop()
 
 
 class AsyncWorker:

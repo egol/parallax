@@ -12,7 +12,9 @@ services:
     stdin_open: true
     cap_add: [NET_ADMIN]
     environment:
-      PARALLAX_TEST_MODE: "1"
+      PARALLAX_TEST_MODE: "${PARALLAX_LOCALNET_TEST_MODE:-1}"
+      PARALLAX_SCHEDULER_HEARTBEAT_TIMEOUT_SEC: "${PARALLAX_SCHEDULER_HEARTBEAT_TIMEOUT_SEC:-30}"
+      PARALLAX_SCHEDULER_INACTIVE_HEARTBEAT_TIMEOUT_SEC: "${PARALLAX_SCHEDULER_INACTIVE_HEARTBEAT_TIMEOUT_SEC:-300}"
     hostname: host
     networks:
       parallax-net:
@@ -28,7 +30,7 @@ services:
     stdin_open: true
     cap_add: [NET_ADMIN]
     environment:
-      PARALLAX_TEST_MODE: "1"
+      PARALLAX_TEST_MODE: "${PARALLAX_LOCALNET_TEST_MODE:-1}"
     hostname: worker1
     depends_on: [host]
     networks:
@@ -45,12 +47,29 @@ services:
     stdin_open: true
     cap_add: [NET_ADMIN]
     environment:
-      PARALLAX_TEST_MODE: "1"
+      PARALLAX_TEST_MODE: "${PARALLAX_LOCALNET_TEST_MODE:-1}"
     hostname: worker2
     depends_on: [host]
     networks:
       parallax-net:
         aliases: [worker2]
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+
+  worker3:
+    image: mycelia/parallax-localnet:dev
+    command: sleep infinity
+    working_dir: /parallax
+    tty: true
+    stdin_open: true
+    cap_add: [NET_ADMIN]
+    environment:
+      PARALLAX_TEST_MODE: "${PARALLAX_LOCALNET_TEST_MODE:-1}"
+    hostname: worker3
+    depends_on: [host]
+    networks:
+      parallax-net:
+        aliases: [worker3]
     volumes:
       - hf-cache:/root/.cache/huggingface
 

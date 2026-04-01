@@ -9,10 +9,13 @@ import os
 import random
 from typing import List, Optional
 
+from parallax.sglang.cpu_compat import install_cpu_import_shims
+
+install_cpu_import_shims()
+
 import sglang
 import sglang.srt.distributed.parallel_state
 import torch
-from mlx_lm.utils import load_config
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.distributed import (
     get_pp_group,
@@ -40,6 +43,7 @@ from parallax.sglang.monkey_patch import apply_parallax_sglang_monkey_patch
 from parallax.sglang.monkey_patch_utils.weight_loader_filter import (
     set_layer_range_for_filtering,
 )
+from parallax.utils.hf_compat import load_config
 from parallax.utils.tokenizer_utils import load_tokenizer
 
 logger = logging.getLogger(__name__)
@@ -210,8 +214,10 @@ def form_sgl_server_args(
     model_path: str,
     dtype: str = "bfloat16",
     kv_cache_memory_fraction: float = 0.85,
+    max_total_tokens: Optional[int] = None,
     tp_size: int = 1,
     dp_size: int = 1,
+    device: Optional[str] = None,
     attention_backend: str = "flashinfer",
     enable_dp_attention: bool = False,
     kv_block_size: int = 64,
@@ -227,13 +233,18 @@ def form_sgl_server_args(
     max_lora_chunk_size: Optional[int] = 128,
 ):
     """Creates a SGL ServerArgs object"""
+    if device == "cpu":
+        attention_backend = "torch_native"
+
     sgl_server_args = ServerArgs(
         model_path=model_path,
         dtype=dtype,
+        device=device,
         attention_backend=attention_backend,
         enable_dp_attention=enable_dp_attention,
         page_size=kv_block_size,
         mem_fraction_static=kv_cache_memory_fraction,
+        max_total_tokens=max_total_tokens,
         moe_runner_backend=moe_runner_backend,
         tp_size=tp_size,
         trust_remote_code=True,
@@ -255,11 +266,13 @@ def initialize_sgl_model_runner(
     model_repo: str,
     start_layer: int,
     end_layer: int,
+    device: Optional[str],
     kv_cache_memory_fraction: float,
     attention_backend: str,
     kv_block_size: int,
     moe_runner_backend: str,
     max_num_tokens_per_batch: int = 16384,
+    max_total_tokens: Optional[int] = None,
     enable_lora: Optional[bool] = False,
     max_lora_rank: Optional[int] = None,
     lora_target_modules: Optional[List[str]] = None,
@@ -328,8 +341,10 @@ def initialize_sgl_model_runner(
         str(model_path),
         dtype,
         kv_cache_memory_fraction,
+        max_total_tokens,
         tp_size,
         dp_size,
+        device,
         attention_backend,
         enable_dp_attention,
         kv_block_size,

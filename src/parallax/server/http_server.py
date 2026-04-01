@@ -29,11 +29,10 @@ import uvicorn
 import zmq
 import zmq.asyncio
 from fastapi.responses import ORJSONResponse, StreamingResponse
-from mlx_lm.tokenizer_utils import StreamingDetokenizer
-from mlx_lm.utils import load_config
 from pydantic import BaseModel
 from starlette.datastructures import State
 
+from parallax.utils.hf_compat import StreamingDetokenizer, load_config
 from parallax.utils.selective_download import download_metadata_only
 from parallax.utils.tokenizer_utils import (
     ToolCallState,
@@ -42,6 +41,7 @@ from parallax.utils.tokenizer_utils import (
 )
 from parallax.utils.utils import get_zmq_socket
 from parallax_utils.logging_config import get_logger
+from parallax_utils.runtime_compat import uvicorn_loop_name
 
 logger = get_logger(__name__)
 
@@ -589,7 +589,7 @@ class ParallaxHttpServer:
             host=self.host,
             port=self.port,
             timeout_keep_alive=5,
-            loop="uvloop",
+            loop=uvicorn_loop_name(),
         )
         server = uvicorn.Server(config)
         await server.serve()

@@ -22,6 +22,7 @@ trap 'on_exit $?' EXIT
 echo "=== Parallax nettest: latency smoke ==="
 
 boot_full_cluster
+echo "$(validate_split_topology "$PARALLAX_LOCALNET_INIT_NODES")"
 
 # Baseline chat
 echo "--- baseline chat ---"
@@ -31,7 +32,8 @@ validate_synthetic_response "$baseline" "baseline"
 # Inject latency
 echo "--- injecting latency ---"
 inject_latency worker1 200
-inject_latency worker2 500 50
+inject_latency worker2 350 25
+inject_latency worker3 500 50
 
 # Chat under latency (extended timeout via retries in request_synthetic_chat)
 echo "--- chat under latency ---"
@@ -42,6 +44,7 @@ validate_synthetic_response "$latency_response" "latency"
 echo "--- clearing latency ---"
 clear_tc worker1
 clear_tc worker2
+clear_tc worker3
 
 echo "--- post-recovery chat ---"
 recovered="$(request_synthetic_chat)"

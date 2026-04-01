@@ -168,7 +168,7 @@ except Exception:
 
 # Clear all network simulation state on all containers.
 clear_all_network_conditions() {
-  for container in host worker1 worker2; do
+  for container in host "${WORKER_SERVICES[@]}"; do
     clear_tc "$container" 2>/dev/null || true
     heal_partition "$container" 2>/dev/null || true
   done

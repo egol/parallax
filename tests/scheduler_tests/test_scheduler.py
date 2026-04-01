@@ -4,6 +4,8 @@ Minimal tests for the Scheduler orchestrator.
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 from scheduling.node import RequestSignal
 from scheduling.scheduler import Scheduler
 
@@ -293,6 +295,49 @@ def test_rr_expand_pipelines_from_newly_joined_standby_nodes():
     assert len(registered2) == 2
     # Both nodes should now be ACTIVE
     assert sched.node_manager.num_active_nodes == 2
+
+
+def test_scheduler_uses_extended_timeout_for_not_ready_nodes():
+    """Not-ready workers should survive long model init stalls."""
+    model = build_model_info(12)
+    node = build_node("booting-node", model, tflops=312.0, mem_gb=80.0, x=0, y=0)
+    node.is_active = False
+    sched = Scheduler(
+        model,
+        [node],
+        min_nodes_bootstrapping=1,
+        heartbeat_timeout=30.0,
+        inactive_heartbeat_timeout=180.0,
+    )
+
+    with patch("scheduling.scheduler.time.time", return_value=node.last_heartbeat + 120.0):
+        sched.checking_node_heartbeat()
+
+    assert sched._pending_leaves.qsize() == 0
+
+    with patch("scheduling.scheduler.time.time", return_value=node.last_heartbeat + 181.0):
+        sched.checking_node_heartbeat()
+
+    assert sched._pending_leaves.get_nowait() == node.node_id
+
+
+def test_scheduler_keeps_short_timeout_for_ready_nodes():
+    """Ready workers should still be evicted quickly when heartbeats stop."""
+    model = build_model_info(12)
+    node = build_node("ready-node", model, tflops=312.0, mem_gb=80.0, x=0, y=0)
+    node.is_active = True
+    sched = Scheduler(
+        model,
+        [node],
+        min_nodes_bootstrapping=1,
+        heartbeat_timeout=30.0,
+        inactive_heartbeat_timeout=180.0,
+    )
+
+    with patch("scheduling.scheduler.time.time", return_value=node.last_heartbeat + 31.0):
+        sched.checking_node_heartbeat()
+
+    assert sched._pending_leaves.get_nowait() == node.node_id
 
 
 def test_complicated_rr():

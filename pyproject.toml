@@ -29,7 +29,7 @@ dependencies = [
   "httpx[socks]>=0.26.0",
   "aiohttp",
   "uvicorn",
-  "uvloop",
+  "uvloop; platform_system != 'Windows'",
   "fastapi",
   "pydantic",
   "protobuf==6.31.1",
@@ -51,7 +51,7 @@ mac = [
 ]
 
 gpu = [
-  "sglang[all]==0.5.7",
+  "sglang==0.5.7",
   "mlx-lm==0.28.4",
   "mlx[cpu]==0.30.0",
 ]
@@ -60,6 +60,10 @@ vllm = [
   "vllm==0.14.0",
   "mlx-lm==0.28.4",
   "mlx[cpu]==0.30.0",
+]
+
+windows-runtime = [
+  "vllm==0.14.0",
 ]
 
 benchmark = [

@@ -63,6 +63,7 @@ This creates:
 - `host`
 - `worker1`
 - `worker2`
+- `worker3`
 - a shared Hugging Face cache volume
 - a dedicated bridge network named by Compose
 
@@ -125,7 +126,7 @@ parallax join \
 
 ## Worker Commands
 
-Open a shell in `worker1` or `worker2`:
+Open a shell in `worker1`, `worker2`, or `worker3`:
 
 ```bash
 docker compose -f parallax/docker/docker-compose.localnet.yml exec worker1 bash
@@ -150,8 +151,8 @@ parallax join \
   -u
 ```
 
-Repeat on `worker2` with a separate port set such as `3202`, `3102`, `4102`,
-and `5102`.
+Repeat on `worker2` and `worker3` with separate port sets such as `3202` /
+`3102` / `4102` / `5102` and `3203` / `3103` / `4103` / `5103`.
 
 ## Small-Model Validation
 
@@ -190,10 +191,19 @@ The repository script `parallax/docker/run_localnet_smoke.sh` automates exactly
 that sequence and exits non-zero on any failure.
 
 `parallax/docker/run_localnet_real_model_smoke.sh` runs the same topology, but
-switches worker test mode to a tiny CPU Hugging Face model so completions come
-from an actual model instead of the synthetic echo backend. It is still a
-best-effort local smoke: cold-cache downloads, CPU-only inference, and slower
-network conditions can make it materially slower than the synthetic harness.
+switches worker test mode to a small CPU Hugging Face model so completions come
+from an actual model instead of the synthetic echo backend. It defaults to a
+longer not-ready heartbeat timeout on the scheduler and a 300-second cluster
+readiness wait so cold-cache CPU init does not flap the pipeline during model
+load. It also constrains worker-side KV cache and sequence budgets so three
+real-model CPU workers fit on a single modest host instead of overcommitting
+RAM during shard initialization. The default real-model lanes force a small
+static KV pool with `--kv-cache-memory-fraction 0.45 --max-total-tokens 4096`
+so each worker clears SGLang's positive-memory check without greedily
+reserving most of host RAM during init. Override `WORKER_JOIN_ARGS` if your
+machine needs different sizing. It is still a best-effort local smoke:
+cold-cache downloads, CPU-only inference, and slower network conditions can
+make it materially slower than the synthetic harness.
 
 `parallax/docker/run_localnet_chaos_smoke.sh` adds an abrupt worker container
 stop/start during serving and verifies that the scheduler degrades and

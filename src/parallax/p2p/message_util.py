@@ -1,4 +1,4 @@
-﻿"""
+"""
 Utility functions for message serialization and deserialization.
 
 This module contains utility functions for serializing and deserializing messages
@@ -8,7 +8,10 @@ between the P2P server and the executor.
 import io
 from typing import Any, List, Optional
 
-import mlx.core as mx
+try:
+    import mlx.core as mx
+except Exception:  # pragma: no cover - optional dependency in CPU-only images
+    mx = None
 
 from parallax.p2p.proto import forward_pb2
 from parallax.server.request import IntermediateRequest, Request, RequestStatus
@@ -201,7 +204,7 @@ def sampling_params_to_proto(params: SamplingParams) -> forward_pb2.SamplingPara
 
 def tensor_to_bytes(tensor: Any, device: Optional[str] = "mlx") -> bytes:
     """Convert tensor to protobuf Tensor using safetensor serialization."""
-    if device is not None and device.startswith("cuda"):
+    if device is not None and (device.startswith("cuda") or device == "cpu"):
         from safetensors.torch import save
 
         # Convert tensor to CPU
@@ -213,6 +216,8 @@ def tensor_to_bytes(tensor: Any, device: Optional[str] = "mlx") -> bytes:
         serialized_data = save({"tensor": cpu_tensor.contiguous()})
         return serialized_data
     else:
+        if mx is None:
+            raise RuntimeError("MLX is required for non-torch tensor serialization")
         assert tensor.size > 0, "Tensor must have size > 0"
         buffer = io.BytesIO()
         mx.save_safetensors(buffer, {"tensor": tensor})
@@ -224,12 +229,14 @@ def bytes_to_tensor(
     device: Optional[str] = "mlx",
 ) -> Any:
     """Convert bytes (safetensor format) to tensor."""
-    if device is not None and device.startswith("cuda"):
+    if device is not None and (device.startswith("cuda") or device == "cpu"):
         from safetensors.torch import load
 
         tensor_dict = load(tensor)
         tensor = tensor_dict["tensor"].to(device)
     else:
+        if mx is None:
+            raise RuntimeError("MLX is required for non-torch tensor deserialization")
         buffer = io.BytesIO(tensor)
         tensors_dict = mx.load(buffer, format="safetensors")
         tensor = tensors_dict["tensor"]

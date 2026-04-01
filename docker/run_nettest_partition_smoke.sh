@@ -29,6 +29,7 @@ trap 'on_exit $?' EXIT
 echo "=== Parallax nettest: partition smoke ==="
 
 boot_full_cluster
+echo "$(validate_split_topology "$PARALLAX_LOCALNET_INIT_NODES")"
 
 # Baseline chat
 echo "--- baseline chat ---"
@@ -39,15 +40,16 @@ validate_synthetic_response "$baseline" "baseline"
 echo "--- phase 1: container stop partition ---"
 compose stop worker1 >/dev/null
 # Check registered_workers count, not node_list (stale entries linger)
-wait_status "data.get('topology', {}).get('totals', {}).get('registered_workers', 0) < 2" 90 >/dev/null
+wait_status "data.get('topology', {}).get('totals', {}).get('registered_workers', 0) < 3" 90 >/dev/null
 echo "--- scheduler detected worker1 loss ---"
 
 # Restart and recover
 compose start worker1 >/dev/null
 sleep 2
 start_worker_join worker1 3101 4101 5101 "$scheduler_addr"
-wait_status "data.get('topology', {}).get('totals', {}).get('registered_workers', 0) >= 2" 120 >/dev/null
+wait_status "data.get('topology', {}).get('totals', {}).get('registered_workers', 0) >= 3" 120 >/dev/null
 wait_status "data.get('status') == 'available' and data.get('topology', {}).get('totals', {}).get('ready_pipelines', 0) >= 1" 120 >/dev/null
+echo "$(validate_split_topology "$PARALLAX_LOCALNET_INIT_NODES")"
 
 echo "--- phase 1 recovery verified ---"
 recovered="$(request_synthetic_chat)"
@@ -60,6 +62,7 @@ assert_unreachable worker1 host 3301
 
 # Verify worker2 is unaffected
 assert_reachable worker2 host 3301
+assert_reachable worker3 host 3301
 
 # Unblock and verify connectivity restored
 unblock_traffic worker1 host

@@ -43,6 +43,7 @@ class Scheduler:
         rebalance_threshold: float = float("inf"),
         water_filling_max_iterations: int = 40,
         heartbeat_timeout: float = 30.0,
+        inactive_heartbeat_timeout: Optional[float] = None,
         trim_layers_on_turning_points: bool = False,
         state_change_callback: Optional[Callable[[str], None]] = None,
     ) -> None:
@@ -60,6 +61,8 @@ class Scheduler:
             rebalance_threshold: Threshold for triggering rebalancing in allocation.
             water_filling_max_iterations: Max iterations for water-filling allocation.
             heartbeat_timeout: Time in seconds to consider node heartbeat stale.
+            inactive_heartbeat_timeout: Time in seconds to consider a not-ready node
+                heartbeat stale. Defaults to `heartbeat_timeout`.
             trim_layers_on_turning_points: Whether to trim layers on turning points.
         """
         self.model_info = model_info
@@ -97,6 +100,12 @@ class Scheduler:
         self._request_queue: "queue.Queue[RequestSignal]" = queue.Queue()
         self.request_arrival_horizon_sec = request_arrival_horizon_sec
         self.heartbeat_timeout = heartbeat_timeout
+        self.inactive_heartbeat_timeout = max(
+            heartbeat_timeout,
+            heartbeat_timeout
+            if inactive_heartbeat_timeout is None
+            else inactive_heartbeat_timeout,
+        )
         self._arrival_ts: Deque[float] = deque()
 
         # Event queues for main loop orchestration (thread-safe)
@@ -277,8 +286,20 @@ class Scheduler:
         # Stale nodes can be stuck in waiting during failed bootstrap/join paths,
         # so heartbeat eviction has to cover the full registered set.
         for node in list(self.node_manager.nodes):
-            if time.time() - node.last_heartbeat > self.heartbeat_timeout:
-                logger.debug(f"Node {node.node_id} heartbeat timeout")
+            timeout = (
+                self.heartbeat_timeout
+                if node.is_active
+                else self.inactive_heartbeat_timeout
+            )
+            heartbeat_age = time.time() - node.last_heartbeat
+            if heartbeat_age > timeout:
+                logger.info(
+                    "Node %s heartbeat timeout (ready=%s, age=%.1fs, timeout=%.1fs)",
+                    node.node_id,
+                    node.is_active,
+                    heartbeat_age,
+                    timeout,
+                )
                 # Route leave through the event loop so global rebalance/reboot is serialized.
                 self.enqueue_leave(node.node_id)
 

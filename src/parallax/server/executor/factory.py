@@ -3,6 +3,7 @@ Creates executor from factory for different backends.
 """
 
 import argparse
+import os
 from typing import Any, List, Optional
 
 from parallax.utils.utils import get_current_device
@@ -19,13 +20,13 @@ def create_executor_config(args: argparse.Namespace, shared_state=None, conn=Non
         "start_layer": args.start_layer,
         "end_layer": args.end_layer,
         "dtype": args.dtype,
-        "enforce_eager": getattr(args, "enforce_eager", False),
         "max_sequence_length": args.max_sequence_length if "max_sequence_length" in args else None,
         "max_batch_size": args.max_batch_size if "max_batch_size" in args else None,
         "kv_block_size": args.kv_block_size,
         "kv_cache_memory_fraction": args.kv_cache_memory_fraction,
         "enable_prefix_cache": args.enable_prefix_cache,
         "max_num_tokens_per_batch": args.max_num_tokens_per_batch,
+        "max_tokens_in_kv_pool": getattr(args, "max_total_tokens", None),
         "prefill_priority": args.prefill_priority,
         "micro_batch_ratio": args.micro_batch_ratio,
         "scheduler_wait_ms": args.scheduler_wait_ms,
@@ -65,6 +66,7 @@ def create_executor_config(args: argparse.Namespace, shared_state=None, conn=Non
     elif args.gpu_backend == "vllm":
         config.update(
             {
+                "enforce_eager": getattr(args, "enforce_eager", False),
                 "fully_sharded_loras": getattr(args, "fully_sharded_loras", False),
                 "enable_return_routed_experts": getattr(
                     args, "enable_return_routed_experts", False
@@ -85,9 +87,11 @@ def create_from_args(
     Creat executor for different backend.
     Lazy import here since CUDA modules cannot be import withough hardware support.
     """
-    config = create_executor_config(args, shared_state, conn)
     if device is None:
         device = get_current_device()
+    config = create_executor_config(args, shared_state, conn)
+    config["device"] = device
+
     if device is not None and device.startswith("cuda"):
         if args.gpu_backend == "sglang":
             from parallax.server.executor.sglang_executor import SGLExecutor
@@ -99,10 +103,20 @@ def create_from_args(
             executor = VLLMExecutor(**config)
         else:
             raise ValueError(f"Unsupported GPU backend type: {args.gpu_backend}")
+    elif device == "cpu":
+        if args.gpu_backend != "sglang":
+            raise ValueError(f"Unsupported backend for CPU device: {args.gpu_backend}")
+
+        os.environ.setdefault("SGLANG_USE_CPU_ENGINE", "1")
+        from parallax.sglang.cpu_compat import install_cpu_import_shims
+
+        install_cpu_import_shims()
+        from parallax.server.executor.sglang_executor import SGLExecutor
+
+        executor = SGLExecutor(**config)
     elif device == "mlx":
         from parallax.server.executor.mlx_executor import MLXExecutor
 
-        config.pop("enforce_eager", None)
         executor = MLXExecutor(**config)
     else:
         raise ValueError(f"Unsupported device type: {device}")

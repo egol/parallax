@@ -25,6 +25,17 @@ def resolve_lattica_key_path(default: Optional[str] = None) -> Optional[str]:
     return default
 
 
+def _get_env_float(name: str, default: float) -> float:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("Ignoring invalid %s=%r; using default %.1f", name, raw, default)
+        return default
+
+
 class SchedulerManage:
     """
     Coordinates the in-process scheduler and the P2P RPC layer.
@@ -760,6 +771,11 @@ class SchedulerManage:
 
         self.model_name = model_name
         self.init_nodes_num = init_nodes_num
+        heartbeat_timeout = _get_env_float("PARALLAX_SCHEDULER_HEARTBEAT_TIMEOUT_SEC", 30.0)
+        inactive_heartbeat_timeout = _get_env_float(
+            "PARALLAX_SCHEDULER_INACTIVE_HEARTBEAT_TIMEOUT_SEC",
+            max(heartbeat_timeout, 300.0),
+        )
 
         model_info = get_model_info(model_name, self.use_hfcache)
         self.scheduler = Scheduler(
@@ -768,7 +784,14 @@ class SchedulerManage:
             min_nodes_bootstrapping=init_nodes_num,
             enable_weight_refit=self.enable_weight_refit,
             weight_refit_mode=self.weight_refit_mode,
+            heartbeat_timeout=heartbeat_timeout,
+            inactive_heartbeat_timeout=inactive_heartbeat_timeout,
             state_change_callback=self.on_scheduler_state_change,
+        )
+        logger.info(
+            "Scheduler heartbeat timeouts configured: ready=%.1fs inactive=%.1fs",
+            heartbeat_timeout,
+            inactive_heartbeat_timeout,
         )
         self.scheduler_ready_event.set()
         if hasattr(self, "connection_handler") and self.connection_handler is not None:

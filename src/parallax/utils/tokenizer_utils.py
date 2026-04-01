@@ -9,15 +9,15 @@ from functools import partial
 from json import JSONDecodeError
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from mlx_lm.tokenizer_utils import (
+from parallax.utils.hf_compat import (
     BPEStreamingDetokenizer,
     NaiveStreamingDetokenizer,
     SPMStreamingDetokenizer,
-    _is_bpe_decoder,
-    _is_spm_decoder,
-    _is_spm_decoder_no_space,
+    is_bpe_decoder,
+    is_spm_decoder,
+    is_spm_decoder_no_space,
+    load_tokenizer as _compat_load_tokenizer,
 )
-from mlx_lm.tokenizer_utils import load as _mlx_load_tokenizer
 
 
 class ParallaxNaiveStreamingDetokenizer(NaiveStreamingDetokenizer):
@@ -33,27 +33,44 @@ class ParallaxBPEStreamingDetokenizer(BPEStreamingDetokenizer):
     """A custom BPE streaming detokenizer that skips initializing tokenmap"""
 
     def __init__(self, tokenizer, tokenmap):
-        self.clean_spaces = tokenizer.clean_up_tokenization_spaces
+        self._tokenizer = tokenizer
+        self.clean_spaces = getattr(tokenizer, "clean_up_tokenization_spaces", False)
         self.tokenmap = tokenmap
         self.reset()
-        self.make_byte_decoder()
+        make_byte_decoder = getattr(self, "make_byte_decoder", None)
+        if callable(make_byte_decoder):
+            make_byte_decoder()
 
 
 class ParallaxSPMStreamingDetokenizer(SPMStreamingDetokenizer):
     """A custom SPM streaming detokenizer that skips initializing tokenmap"""
 
     def __init__(self, tokenizer, tokenmap, trim_space=True):
+        self._tokenizer = tokenizer
         self.trim_space = trim_space
         self._sep = "\u2581".encode()
         self.tokenmap = tokenmap
         self.reset()
 
 
+def _tokenizer_vocab(tokenizer):
+    vocab = getattr(tokenizer, "vocab", None)
+    if isinstance(vocab, dict):
+        return vocab
+
+    getter = getattr(tokenizer, "get_vocab", None)
+    if callable(getter):
+        return getter()
+
+    raise AttributeError("Tokenizer does not expose a vocab dictionary")
+
+
 def _get_spm_tokenmap(tokenizer):
     """Initialize spm tokenmap for reuse"""
     # Extract the tokens in a list from id to text
-    tokenmap = [""] * (max(tokenizer.vocab.values()) + 1)
-    for value, tokenid in tokenizer.vocab.items():
+    vocab = _tokenizer_vocab(tokenizer)
+    tokenmap = [""] * (max(vocab.values()) + 1)
+    for value, tokenid in vocab.items():
         if value.startswith("<0x"):
             # Replace bytes with their value
             tokenmap[tokenid] = bytes([int(value[3:5], 16)])
@@ -65,8 +82,9 @@ def _get_spm_tokenmap(tokenizer):
 def _get_bpe_tokenmap(tokenizer):
     """Initialize bpe tokenmap for reuse"""
     # Extract the tokens in a list from id to text
-    tokenmap = [None] * len(tokenizer.vocab)
-    for value, tokenid in tokenizer.vocab.items():
+    vocab = _tokenizer_vocab(tokenizer)
+    tokenmap = [None] * (max(vocab.values()) + 1)
+    for value, tokenid in vocab.items():
         tokenmap[tokenid] = value
     return tokenmap
 
@@ -90,13 +108,13 @@ def load_detokenizer(model_path, tokenizer):
                 raise JSONDecodeError("Failed to parse tokenizer.json", e.doc, e.pos)
 
         if "decoder" in tokenizer_content:
-            if _is_spm_decoder(tokenizer_content["decoder"]):
+            if is_spm_decoder(tokenizer_content["decoder"]):
                 detokenizer_class = ParallaxSPMStreamingDetokenizer
                 tokenmap = _get_spm_tokenmap(tokenizer)
-            elif _is_spm_decoder_no_space(tokenizer_content["decoder"]):
+            elif is_spm_decoder_no_space(tokenizer_content["decoder"]):
                 detokenizer_class = partial(ParallaxSPMStreamingDetokenizer, trim_space=False)
                 tokenmap = _get_spm_tokenmap(tokenizer)
-            elif _is_bpe_decoder(tokenizer_content["decoder"]):
+            elif is_bpe_decoder(tokenizer_content["decoder"]):
                 detokenizer_class = ParallaxBPEStreamingDetokenizer
                 tokenmap = _get_bpe_tokenmap(tokenizer)
 
@@ -125,7 +143,11 @@ def load_tokenizer(model_path, trust_remote_code=True, tokenizer_config_extra=No
         tokenizer_config_extra = tokenizer_config_extra.copy()
         tokenizer_config_extra["trust_remote_code"] = True
 
-    return _mlx_load_tokenizer(model_path, tokenizer_config_extra=tokenizer_config_extra, **kwargs)
+    return _compat_load_tokenizer(
+        model_path,
+        tokenizer_config_extra=tokenizer_config_extra,
+        **kwargs,
+    )
 
 
 @dataclass

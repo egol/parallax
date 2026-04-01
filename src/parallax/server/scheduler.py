@@ -21,12 +21,14 @@ Our scheduler also handles tokenization and pre-processing for the First Peer's 
 
 import time
 from collections import OrderedDict, deque
-from typing import Deque, Dict, List, Optional
+from typing import TYPE_CHECKING, Deque, Dict, List, Optional
 
-from parallax.server.cache_manager import CacheManager
 from parallax.server.request import InitialRequest, Request, RequestStatus
 from parallax.utils.shared_state import SharedState
 from parallax_utils.logging_config import get_logger
+
+if TYPE_CHECKING:
+    from parallax.server.cache_manager import CacheManager
 
 logger = get_logger(__name__)
 
@@ -45,7 +47,7 @@ class Scheduler:
         scheduler_wait_ms: int = 200,
         micro_batch_ratio: int = 2,
         is_first_peer: bool = False,
-        cache_manager: Optional[CacheManager] = None,
+        cache_manager: Optional["CacheManager"] = None,
         request_timeout_s: Optional[int] = 600,
         shared_state: Optional[SharedState] = None,
         **kwargs,

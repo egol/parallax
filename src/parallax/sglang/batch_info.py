@@ -146,6 +146,9 @@ def select_batch(
         origin_batch.device, non_blocking=True
     )
 
+    # ScheduleBatch.copy() falls back to the dataclass default device ("cuda"),
+    # so preserve the source batch device explicitly for CPU decode paths.
+    ret.device = origin_batch.device
     ret.token_to_kv_pool_allocator = origin_batch.token_to_kv_pool_allocator
     ret.req_to_token_pool = origin_batch.req_to_token_pool
     ret.tree_cache = origin_batch.tree_cache

@@ -128,6 +128,12 @@ def parse_args() -> argparse.Namespace:
         default=16384,
         help="Maximum number of tokens in a batch",
     )
+    parser.add_argument(
+        "--max-total-tokens",
+        type=int,
+        default=None,
+        help="Maximum number of KV-cache tokens to reserve for the executor",
+    )
 
     parser.add_argument(
         "--prefill-priority",
@@ -348,6 +354,10 @@ def validate_args(args: argparse.Namespace) -> None:
 
     if args.max_num_tokens_per_batch <= 0:
         raise ValueError("max_num_tokens_per_batch must be positive")
+
+    max_total_tokens = getattr(args, "max_total_tokens", None)
+    if max_total_tokens is not None and max_total_tokens <= 0:
+        raise ValueError("max_total_tokens must be positive")
 
     if args.kv_block_size <= 0:
         raise ValueError("kv_block_size must be positive")

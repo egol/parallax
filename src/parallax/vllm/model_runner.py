@@ -7,7 +7,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import torch
 import torch.distributed
 import vllm.distributed.parallel_state as parallel_state
-from mlx_lm.utils import load_config
 from vllm.config import (
     AttentionConfig,
     CacheConfig,
@@ -41,6 +40,7 @@ from parallax.sglang.monkey_patch_utils.weight_loader_filter import (
     apply_weight_loader_filter_patch,
     set_layer_range_for_filtering,
 )
+from parallax.utils.hf_compat import load_config
 from parallax.utils.tokenizer_utils import load_tokenizer
 from parallax.vllm.monkey_patch import apply_parallax_vllm_monkey_patch
 from parallax_utils.logging_config import get_logger

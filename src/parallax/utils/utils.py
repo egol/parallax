@@ -21,10 +21,11 @@ except Exception:  # pragma: no cover - unavailable in lightweight test images
     torch = None
 
 try:
-    from mlx_lm.utils import _download, load_config
+    from mlx_lm.utils import _download
 except Exception:  # pragma: no cover - unavailable in lightweight test images
     _download = None
-    load_config = None
+
+from parallax.utils.hf_compat import load_config
 
 from parallax.utils.selective_download import download_metadata_only
 
@@ -65,9 +66,9 @@ def get_current_device():
 
 def get_device_dtype(dtype_str: str, device: str):
     """Gets the real data type according to current device"""
-    if device is not None and device.startswith("cuda"):
+    if device is not None and (device.startswith("cuda") or device == "cpu"):
         if torch is None:
-            raise RuntimeError("Torch is required for CUDA dtype resolution")
+            raise RuntimeError("Torch is required for Torch dtype resolution")
         dtype_map = {
             "float16": torch.float16,
             "bfloat16": torch.bfloat16,
@@ -311,13 +312,12 @@ def combine_padding_and_causal_masks(padding_mask: mx.array, causal_mask: mx.arr
 
 def fetch_model_from_hf(name: str, local_files_only: bool = False):
     """Fetch model from huggingface and returns model config"""
-    if _download is None or load_config is None:
-        raise RuntimeError("MLX-LM is required to fetch model metadata")
-
     if local_files_only:
         model_path = download_metadata_only(name, local_files_only=local_files_only)
-    else:
+    elif _download is not None:
         model_path = _download(name)
+    else:
+        model_path = download_metadata_only(name, local_files_only=False)
     config = load_config(model_path)
     return config
 

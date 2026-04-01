@@ -23,6 +23,7 @@ class TestValidateArgs:
             kv_cache_memory_fraction=0.5,
             max_batch_size=16,
             max_num_tokens_per_batch=1024,
+            max_total_tokens=2048,
             kv_block_size=16,
             micro_batch_ratio=2,
             scheduler_wait_ms=500,
@@ -41,6 +42,7 @@ class TestValidateArgs:
             kv_cache_memory_fraction=0.5,
             max_batch_size=16,
             max_num_tokens_per_batch=1024,
+            max_total_tokens=2048,
             kv_block_size=16,
             micro_batch_ratio=2,
             scheduler_wait_ms=500,
@@ -59,6 +61,7 @@ class TestValidateArgs:
             kv_cache_memory_fraction=0.5,
             max_batch_size=16,
             max_num_tokens_per_batch=1024,
+            max_total_tokens=2048,
             kv_block_size=16,
             micro_batch_ratio=2,
             scheduler_wait_ms=500,
@@ -86,6 +89,7 @@ class TestCreateExecutorConfig:
             kv_cache_memory_fraction=0.8,
             enable_prefix_cache=False,
             max_num_tokens_per_batch=1024,
+            max_total_tokens=2048,
             prefill_priority=0,
             micro_batch_ratio=2,
             scheduler_wait_ms=500,
@@ -120,6 +124,7 @@ class TestCreateExecutorConfig:
             kv_block_size=16,
             kv_cache_memory_fraction=0.8,
             max_num_tokens_per_batch=1024,
+            max_total_tokens=2048,
             prefill_priority=0,
             micro_batch_ratio=2,
             scheduler_wait_ms=500,
@@ -153,6 +158,73 @@ class TestCreateExecutorConfig:
         assert config["end_layer"] == 14
         assert config["dtype"] == "bfloat16"
         assert config["kv_cache_memory_fraction"] == 0.8
+        assert config["max_tokens_in_kv_pool"] == 2048
+        assert "enforce_eager" not in config
+
+    def test_create_config_vllm_includes_enforce_eager(self):
+        """Test vLLM-only config stays scoped to the vLLM executor."""
+        args = argparse.Namespace(
+            model_path="Qwen/Qwen2.5-0.5B-Instruct",
+            start_layer=0,
+            end_layer=14,
+            dtype="bfloat16",
+            max_batch_size=16,
+            max_sequence_length=2048,
+            kv_block_size=16,
+            kv_cache_memory_fraction=0.8,
+            max_num_tokens_per_batch=1024,
+            max_total_tokens=2048,
+            prefill_priority=0,
+            micro_batch_ratio=2,
+            scheduler_wait_ms=500,
+            enable_prefix_cache=False,
+            executor_input_ipc="///ipc/1",
+            executor_output_ipc="///ipc/2",
+            attention_backend="torch_native",
+            moe_runner_backend="auto",
+            tp_rank=0,
+            tp_size=1,
+            nccl_port=4001,
+            use_hfcache=False,
+            enable_lora=False,
+            max_lora_rank=None,
+            lora_target_modules=None,
+            lora_paths=None,
+            max_loras_per_batch=1,
+            max_loaded_loras=8,
+            lora_eviction_policy="lru",
+            lora_backend="triton",
+            max_lora_chunk_size=128,
+            enable_weight_refit=False,
+            weight_refit_mode="disk",
+            gpu_backend="vllm",
+            enforce_eager=True,
+            fully_sharded_loras=False,
+            enable_return_routed_experts=False,
+        )
+
+        config = create_executor_config(args)
+
+        assert config["enforce_eager"] is True
+
+    def test_invalid_max_total_tokens(self):
+        """Test invalid total-token budget."""
+        args = argparse.Namespace(
+            start_layer=0,
+            end_layer=10,
+            dtype="bfloat16",
+            kv_cache_memory_fraction=0.5,
+            max_batch_size=16,
+            max_num_tokens_per_batch=1024,
+            max_total_tokens=0,
+            kv_block_size=16,
+            micro_batch_ratio=2,
+            scheduler_wait_ms=500,
+            enable_weight_refit=False,
+        )
+
+        with pytest.raises(ValueError, match="max_total_tokens must be positive"):
+            validate_args(args)
 
 
 class TestParseArgs:
@@ -174,6 +246,8 @@ class TestParseArgs:
             "0.8",
             "--max-sequence-length",
             "1024",
+            "--max-total-tokens",
+            "2048",
         ],
     )
     def test_parse_valid_args(self):
@@ -185,6 +259,7 @@ class TestParseArgs:
         assert args.end_layer == 14
         assert args.dtype == "bfloat16"
         assert args.kv_cache_memory_fraction == 0.8
+        assert args.max_total_tokens == 2048
 
     @patch(
         "sys.argv",

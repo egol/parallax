@@ -22,6 +22,7 @@ trap 'on_exit $?' EXIT
 echo "=== Parallax nettest: bandwidth smoke ==="
 
 boot_full_cluster
+echo "$(validate_split_topology "$PARALLAX_LOCALNET_INIT_NODES")"
 
 # Baseline chat
 echo "--- baseline chat ---"
@@ -32,6 +33,7 @@ validate_synthetic_response "$baseline" "baseline"
 echo "--- limiting bandwidth ---"
 limit_bandwidth worker1 256
 limit_bandwidth worker2 256
+limit_bandwidth worker3 256
 
 # Chat under bandwidth constraint (synthetic payloads are small)
 echo "--- chat under bandwidth constraint ---"
@@ -42,6 +44,7 @@ validate_synthetic_response "$bw_response" "bandwidth-limited"
 echo "--- clearing bandwidth limits ---"
 clear_tc worker1
 clear_tc worker2
+clear_tc worker3
 
 echo "--- post-recovery chat ---"
 recovered="$(request_synthetic_chat)"
