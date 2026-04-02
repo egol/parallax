@@ -2,6 +2,7 @@ import copy
 import os
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from lattica import Lattica
@@ -34,6 +35,18 @@ def _get_env_float(name: str, default: float) -> float:
     except ValueError:
         logger.warning("Ignoring invalid %s=%r; using default %.1f", name, raw, default)
         return default
+
+
+def _parse_runtime_updated_at(value: str) -> Optional[float]:
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        ).timestamp()
+    except ValueError:
+        logger.debug("Ignoring unparseable runtime updated_at=%r", value)
+        return None
 
 
 class SchedulerManage:
@@ -554,7 +567,11 @@ class SchedulerManage:
             )
         ]
         if not runtime_nodes:
-            return {"model_init": None}
+            return {
+                "model_init": None,
+                "runtime_stale": False,
+                "cluster_runtime_updated_at": "",
+            }
 
         min_priority = min(
             self._runtime_stage_priority(node["runtime"].get("init_stage", "idle"))
@@ -597,6 +614,15 @@ class SchedulerManage:
             for node in runtime_nodes
             if node["runtime"].get("updated_at")
         ]
+        latest_runtime_updated_at = most_recent_node["runtime"].get("updated_at", "") or ""
+        latest_runtime_timestamp = _parse_runtime_updated_at(latest_runtime_updated_at)
+        runtime_stale_threshold_seconds = _get_env_float(
+            "PARALLAX_CLUSTER_RUNTIME_STALE_THRESHOLD_SEC",
+            15.0,
+        )
+        runtime_stale = latest_runtime_timestamp is None or (
+            (time.time() - latest_runtime_timestamp) > runtime_stale_threshold_seconds
+        )
         model_name = (
             stage_node["runtime"].get("model_name")
             or most_recent_node["runtime"].get("model_name")
@@ -618,10 +644,12 @@ class SchedulerManage:
                 "downloaded_files": downloaded_files,
                 "total_files": total_files,
                 "current_file": most_recent_node["runtime"].get("current_file", "") or "",
-                "last_progress_at": most_recent_node["runtime"].get("updated_at", "") or "",
+                "last_progress_at": latest_runtime_updated_at,
                 "failure_reason": stage_node["runtime"].get("failure_reason", "") or "",
                 "source_node_id": stage_node.get("node_id", "") or "",
-            }
+            },
+            "runtime_stale": runtime_stale,
+            "cluster_runtime_updated_at": latest_runtime_updated_at,
         }
 
     def build_node_info(
@@ -726,6 +754,8 @@ class SchedulerManage:
                 },
                 "runtime": {
                     "model_init": None,
+                    "runtime_stale": False,
+                    "cluster_runtime_updated_at": "",
                 },
             },
         }
