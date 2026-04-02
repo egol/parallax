@@ -40,6 +40,7 @@ from parallax.sglang.monkey_patch_utils.weight_loader_filter import (
     apply_weight_loader_filter_patch,
     set_layer_range_for_filtering,
 )
+from parallax.utils.shared_state import SharedState
 from parallax.utils.hf_compat import load_config
 from parallax.utils.tokenizer_utils import load_tokenizer
 from parallax.vllm.monkey_patch import apply_parallax_vllm_monkey_patch
@@ -47,6 +48,27 @@ from parallax_utils.logging_config import get_logger
 from parallax_utils.prepare_adapter import download_adapter_config
 
 logger = get_logger(__name__)
+
+
+def _coerce_shared_state(shared_state) -> Optional[SharedState]:
+    if shared_state is None:
+        return None
+    if isinstance(shared_state, SharedState):
+        return shared_state
+    return SharedState(shared_state)
+
+
+def _update_loading_runtime_state(shared_state, model_name: str) -> None:
+    shared_state = _coerce_shared_state(shared_state)
+    if shared_state is None:
+        return
+    shared_state.update_runtime_state(
+        status=shared_state.get_status(),
+        model_name=model_name,
+        init_stage="loading-shards",
+        init_detail="Loading model shards into the vLLM executor.",
+        failure_reason="",
+    )
 
 
 def _resolve_attention_config(attention_backend: str) -> AttentionConfig:
@@ -404,6 +426,7 @@ def initialize_vllm_model_runner(
         local_files_only=kwargs.get("using_hfcache", False),
         shared_state=shared_state,
     )
+    _update_loading_runtime_state(shared_state, model_repo)
 
     config = load_config(model_path)
     tokenizer = load_tokenizer(model_path, eos_token_ids=config.get("eos_token_id", None))
