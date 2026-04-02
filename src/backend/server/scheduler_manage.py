@@ -1002,16 +1002,14 @@ class SchedulerManage:
 
     def get_schedule_status(self):
         """
-        Return whether a full pipeline has been allocated across joined nodes.
+        Return whether the scheduler can route requests right now.
         """
         if self.scheduler is None:
             logger.debug("SchedulerManage status queried: waiting (scheduler not initialized)")
             return NODE_STATUS_WAITING
 
         # todo rebalance status
-        status = (
-            NODE_STATUS_AVAILABLE if self.scheduler.has_full_pipeline() else NODE_STATUS_WAITING
-        )
+        status = NODE_STATUS_AVAILABLE if self.scheduler.serving_ready() else NODE_STATUS_WAITING
         logger.debug(f"SchedulerManage status queried: {status}")
         return status
 

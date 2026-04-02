@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import random
 import socket
+import subprocess
+import sys
+from functools import lru_cache
 from typing import List
 
 import numpy as np
@@ -11,23 +14,80 @@ import psutil
 import zmq
 
 try:
-    import mlx.core as mx
-except Exception:  # pragma: no cover - unavailable in lightweight test images
-    mx = None
-
-try:
     import torch
 except Exception:  # pragma: no cover - unavailable in lightweight test images
     torch = None
 
-try:
-    from mlx_lm.utils import _download
-except Exception:  # pragma: no cover - unavailable in lightweight test images
-    _download = None
-
 from parallax.utils.hf_compat import load_config
 
 from parallax.utils.selective_download import download_metadata_only
+
+mx = None
+_download = None
+
+
+@lru_cache(maxsize=1)
+def _mlx_import_is_safe() -> bool:
+    """Probe MLX importability in a subprocess so parent Python cannot crash."""
+    if sys.platform != "darwin":
+        return False
+    probe = [
+        sys.executable,
+        "-c",
+        (
+            "import mlx.core as mx; "
+            "mx.metal.device_info(); "
+            "print('ok')"
+        ),
+    ]
+    try:
+        result = subprocess.run(
+            probe,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+    except Exception:
+        return False
+    return result.returncode == 0
+
+
+def _get_mlx_core():
+    """Import MLX lazily only after a crash-safe availability probe passes."""
+    global mx
+    if mx is not None:
+        return mx
+    if not _mlx_import_is_safe():
+        return None
+    try:
+        import mlx.core as mx_module
+    except Exception:
+        return None
+    mx = mx_module
+    return mx
+
+
+def _require_mlx():
+    mx_module = _get_mlx_core()
+    if mx_module is None:
+        raise RuntimeError("MLX is required for this operation")
+    return mx_module
+
+
+def _get_mlx_download():
+    """Import mlx-lm download helper lazily after MLX passes the safety probe."""
+    global _download
+    if _download is not None:
+        return _download
+    if not _mlx_import_is_safe():
+        return None
+    try:
+        from mlx_lm.utils import _download as mlx_download
+    except Exception:
+        return None
+    _download = mlx_download
+    return _download
 
 
 def is_cuda_available():
@@ -43,9 +103,10 @@ def is_mps_available():
 def is_metal_available():
     """Check if MLX Metal backend is available"""
     try:
-        if mx is None:
+        mx_module = _get_mlx_core()
+        if mx_module is None:
             return False
-        mx.metal.device_info()
+        mx_module.metal.device_info()
         return True
     except (RuntimeError, AttributeError, ImportError):
         return False
@@ -75,12 +136,11 @@ def get_device_dtype(dtype_str: str, device: str):
             "float32": torch.float32,
         }
     else:
-        if mx is None:
-            raise RuntimeError("MLX is required for non-CUDA dtype resolution")
+        mx_module = _require_mlx()
         dtype_map = {
-            "float16": mx.float16,
-            "bfloat16": mx.bfloat16,
-            "float32": mx.float32,
+            "float16": mx_module.float16,
+            "bfloat16": mx_module.bfloat16,
+            "float32": mx_module.float32,
         }
     return dtype_map[dtype_str]
 
@@ -130,10 +190,9 @@ def get_zmq_socket(context: zmq.Context, socket_type: zmq.SocketType, endpoint: 
 
 def get_infinite_value_by_dtype(dtype: mx.Dtype):
     """Returns infinite value according to mx dtype"""
-    if mx is None:
-        raise RuntimeError("MLX is required for dtype-specific infinity values")
+    mx_module = _require_mlx()
     inf = 6e4
-    if dtype in (mx.bfloat16, mx.float32):
+    if dtype in (mx_module.bfloat16, mx_module.float32):
         inf = 1e9
     return inf
 
@@ -146,12 +205,11 @@ def pad_prefix_caches(cache: List, input_lengths: List, dtype=None) -> tuple[mx.
         - mx.array: The padded batch of caches with a shape of [B, max_input_seq_len].
         - mx.array: The corresponding 4D k mask with a shape of [B, 1, 1, max_output_seq_len].
     """
-    if mx is None:
-        raise RuntimeError("MLX is required for prefix cache padding")
+    mx_module = _require_mlx()
     if dtype is None:
-        dtype = mx.bfloat16
+        dtype = mx_module.bfloat16
 
-    caches_mx = [mx.array(i) if isinstance(i, np.ndarray) else i for i in cache]
+    caches_mx = [mx_module.array(i) if isinstance(i, np.ndarray) else i for i in cache]
 
     seq_len_axis = 2
     max_input_len = 0
@@ -171,15 +229,15 @@ def pad_prefix_caches(cache: List, input_lengths: List, dtype=None) -> tuple[mx.
         if num_kv_padding > 0:
             pad_shape = list(tensor.shape)
             pad_shape[seq_len_axis] = num_kv_padding
-            padding = mx.zeros(tuple(pad_shape), dtype=tensor.dtype)
-            padded_tensors.append(mx.concatenate([tensor, padding], axis=seq_len_axis))
+            padding = mx_module.zeros(tuple(pad_shape), dtype=tensor.dtype)
+            padded_tensors.append(mx_module.concatenate([tensor, padding], axis=seq_len_axis))
         else:
             padded_tensors.append(tensor)
 
         k_masks.append([1] * (input_seq_len + 1) + [0] * num_mask_padding)
 
-    padded_batch = mx.stack(padded_tensors, axis=0)
-    attention_mask = mx.array(k_masks, dtype=dtype)[:, None, None, :]
+    padded_batch = mx_module.stack(padded_tensors, axis=0)
+    attention_mask = mx_module.array(k_masks, dtype=dtype)[:, None, None, :]
     return padded_batch, attention_mask
 
 
@@ -200,19 +258,18 @@ def pad_inputs(pad_value: int, inputs: List, dtype=None) -> tuple[mx.array, mx.a
         - mx.array: The padded batch of inputs.
         - mx.array: The corresponding 4D attention mask.
     """
-    if mx is None:
-        raise RuntimeError("MLX is required for input padding")
+    mx_module = _require_mlx()
     if dtype is None:
-        dtype = mx.bfloat16
+        dtype = mx_module.bfloat16
 
     if not inputs:
-        return mx.array([]), mx.array([])
+        return mx_module.array([]), mx_module.array([])
 
     max_len = 0
     attention_masks = []
 
     # Check the dimensionality of the input to handle KV cache padding
-    is_kv_cache = isinstance(inputs[0], mx.array) and inputs[0].ndim == 4
+    is_kv_cache = isinstance(inputs[0], mx_module.array) and inputs[0].ndim == 4
 
     if isinstance(inputs[0], list):  # Assuming list of token IDs
         for tokens in inputs:
@@ -224,12 +281,12 @@ def pad_inputs(pad_value: int, inputs: List, dtype=None) -> tuple[mx.array, mx.a
             padded_sequences.append(tokens + [pad_value] * num_padding)
             attention_masks.append([1] * len(tokens) + [0] * num_padding)
 
-        padded_batch = mx.array(padded_sequences)
+        padded_batch = mx_module.array(padded_sequences)
 
     elif isinstance(
-        inputs[0], (mx.array, np.ndarray)
+        inputs[0], (mx_module.array, np.ndarray)
     ):  # Assuming list of hidden states or KV caches
-        inputs_mx = [mx.array(i) if isinstance(i, np.ndarray) else i for i in inputs]
+        inputs_mx = [mx_module.array(i) if isinstance(i, np.ndarray) else i for i in inputs]
 
         # Determine sequence length axis based on input type
         # kv cache: (n_layers, n_kv_h, source_len, h_dim)
@@ -246,23 +303,23 @@ def pad_inputs(pad_value: int, inputs: List, dtype=None) -> tuple[mx.array, mx.a
                 if is_kv_cache:
                     pad_shape = list(tensor.shape)
                     pad_shape[seq_len_axis] = num_padding
-                    padding = mx.zeros(tuple(pad_shape), dtype=tensor.dtype)
+                    padding = mx_module.zeros(tuple(pad_shape), dtype=tensor.dtype)
                 else:
                     # Hidden state shape: (seq_len, hidden_dim)
                     hidden_dim = tensor.shape[1]
-                    padding = mx.zeros((num_padding, hidden_dim), dtype=tensor.dtype)
-                padded_tensors.append(mx.concatenate([tensor, padding], axis=seq_len_axis))
+                    padding = mx_module.zeros((num_padding, hidden_dim), dtype=tensor.dtype)
+                padded_tensors.append(mx_module.concatenate([tensor, padding], axis=seq_len_axis))
             else:
                 padded_tensors.append(tensor)
             attention_masks.append([1] * seq_len + [0] * num_padding)
 
-        padded_batch = mx.stack(padded_tensors, axis=0)
+        padded_batch = mx_module.stack(padded_tensors, axis=0)
 
     else:
         raise TypeError(f"Unsupported input type for padding: {type(inputs[0])}")
 
     # Create 4D attention mask, ensuring it's float
-    attention_mask = mx.array(attention_masks, dtype=dtype)[:, None, None, :]
+    attention_mask = mx_module.array(attention_masks, dtype=dtype)[:, None, None, :]
     return padded_batch, attention_mask
 
 
@@ -278,16 +335,17 @@ def create_causal_mask(seq_len: int, total_len: int, dtype=None) -> mx.array:
     Returns:
         mx.array: A square matrix with -1e9 on the upper triangle (excluding the diagonal).
     """
+    mx_module = _require_mlx()
     assert (
         total_len >= seq_len
     ), f"Total lengths {total_len} should be no less than input sequence {seq_len}."
     inf_value = get_infinite_value_by_dtype(dtype)
-    mask = mx.triu(mx.full((seq_len, seq_len), -inf_value, dtype), k=1)
+    mask = mx_module.triu(mx_module.full((seq_len, seq_len), -inf_value, dtype), k=1)
     if total_len == seq_len:
         return mask
     # total lengths is larger than input sequence length
-    cached_zeros = mx.zeros((seq_len, total_len - seq_len), dtype)
-    final_mask = mx.concatenate([cached_zeros, mask], axis=1)
+    cached_zeros = mx_module.zeros((seq_len, total_len - seq_len), dtype)
+    final_mask = mx_module.concatenate([cached_zeros, mask], axis=1)
     return final_mask
 
 
@@ -314,7 +372,7 @@ def fetch_model_from_hf(name: str, local_files_only: bool = False):
     """Fetch model from huggingface and returns model config"""
     if local_files_only:
         model_path = download_metadata_only(name, local_files_only=local_files_only)
-    elif _download is not None:
+    elif _get_mlx_download() is not None:
         model_path = _download(name)
     else:
         model_path = download_metadata_only(name, local_files_only=False)
@@ -387,12 +445,3 @@ def get_layer_types(config: dict, start_layer: int, end_layer: int) -> List[str]
 
     # Default: all attention layers
     return ["attention"] * num_shard_layers
-    if mx is None:
-        raise RuntimeError("MLX is required for causal mask creation")
-    if dtype is None:
-        dtype = mx.bfloat16
-
-    if mx is None:
-        raise RuntimeError("MLX is required for attention mask combination")
-    if dtype is None:
-        dtype = mx.bfloat16

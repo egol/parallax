@@ -163,6 +163,59 @@ class Scheduler:
         """Check if there is a full pipeline among ACTIVE nodes."""
         return self.node_manager.has_full_pipeline(self.num_layers)
 
+    def serving_ready(self) -> bool:
+        """Return True iff the scheduler can route requests right now."""
+        return self.request_router.routing_ready()
+
+    def _rr_registered_pipeline_count(self) -> int:
+        """Return the number of registered RR pipelines, or 0 for non-RR routing."""
+        if self.routing_strategy != "rr":
+            return 0
+        return len(self.node_manager.get_registered_pipelines())
+
+    def _mark_bootstrapped(self, reason: str) -> None:
+        """Mark bootstrap complete and wake any waiters exactly once."""
+        if self._bootstrapped_event.is_set():
+            return
+        self._bootstrapped_event.set()
+        self._notify_state_change(reason)
+        with self._node_count_cv:
+            self._node_count_cv.notify_all()
+
+    def _retry_rr_pipeline_registration(
+        self, *, trigger: str, snapshot_reason: Optional[str] = None
+    ) -> bool:
+        """Retry RR pipeline registration once routing metadata is available."""
+        if self.routing_strategy != "rr":
+            return False
+        if not self.has_full_pipeline():
+            return False
+        if self._rr_registered_pipeline_count() > 0:
+            if not self._bootstrapped_event.is_set():
+                self._mark_bootstrapped(trigger)
+            return True
+
+        registered = self.request_router.bootstrap()
+        if not registered:
+            logger.info(
+                "[Scheduler] RR pipeline registration still waiting for routing metadata (%s)",
+                trigger,
+            )
+            self._notify_state_change("bootstrap_waiting_for_registration")
+            if snapshot_reason is not None:
+                self.emit_alloc_log_snapshot(reason=snapshot_reason)
+            return False
+
+        logger.info(
+            "[Scheduler] Registered %d RR pipeline(s) after %s",
+            len(registered),
+            trigger,
+        )
+        self._mark_bootstrapped(trigger)
+        if snapshot_reason is not None:
+            self.emit_alloc_log_snapshot(reason=snapshot_reason)
+        return True
+
     def bootstrap(self, reboot: bool = False) -> bool:
         """Initial Node Allocation Assignment."""
         logger.info("[Scheduler] Starting Bootstrap")
@@ -203,8 +256,16 @@ class Scheduler:
         logger.info(f"[Scheduler] Post Bootstrap Layer Assignments: {assignments}")
 
         self.request_router.bootstrap()
-        self._bootstrapped_event.set()
-        self._notify_state_change("bootstrap_completed")
+        if self.routing_strategy == "rr" and self._rr_registered_pipeline_count() == 0:
+            logger.info(
+                "[Scheduler] Bootstrap allocated layers but RR pipeline registration is waiting for routing metadata"
+            )
+            self._bootstrapped_event.clear()
+            self._notify_state_change("bootstrap_waiting_for_registration")
+            self.emit_alloc_log_snapshot(reason="Post Bootstrap (waiting for RR registration)")
+            return False
+
+        self._mark_bootstrapped("bootstrap_completed")
         # Snapshot at INFO after bootstrap since allocations/pipelines may have materially changed.
         self.emit_alloc_log_snapshot(reason="Post Bootstrap")
         return True
@@ -549,6 +610,7 @@ class Scheduler:
     def _process_node_updates(self) -> None:
         """Apply pending node stats updates from the queue."""
         updated_any = False
+        recovered_rr_registration = False
         while True:
             try:
                 node_id, cur, lat, rtts, is_active, last_refit_time = (
@@ -569,8 +631,15 @@ class Scheduler:
                 last_refit_time=last_refit_time,
             )
             updated_any = True
+        if updated_any and not self._bootstrapped_event.is_set() and self.routing_strategy == "rr":
+            recovered_rr_registration = self._retry_rr_pipeline_registration(
+                trigger="node_update_registration_recovered",
+                snapshot_reason="RR registration recovered from node update",
+            )
         if updated_any:
             self._notify_state_change("node_update")
+        if recovered_rr_registration:
+            logger.info("[Scheduler] RR bootstrap completed after node updates refreshed routing data")
 
     def _process_joins(self) -> None:
         """Handle pending join events, honoring bootstrap state for assignment."""

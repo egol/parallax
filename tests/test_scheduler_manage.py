@@ -2,7 +2,11 @@ import os
 from datetime import datetime, timezone
 from unittest.mock import patch
 
+from backend.server.constants import NODE_STATUS_AVAILABLE, NODE_STATUS_WAITING
 from backend.server.scheduler_manage import SchedulerManage
+from scheduling.scheduler import Scheduler
+
+from .scheduler_tests.test_utils import build_model_info, build_node, set_rtt_from_coords
 
 
 def test_run_restarts_scheduler_without_restarting_network_bootstrap_logic():
@@ -86,3 +90,37 @@ def test_aggregate_cluster_runtime_marks_old_runtime_updates_stale():
     assert aggregated["model_init"]["stage"] == "ready"
     assert aggregated["runtime_stale"] is True
     assert aggregated["cluster_runtime_updated_at"] == updated_at
+
+
+def test_get_schedule_status_waits_for_routable_rr_pipeline():
+    with patch("backend.server.scheduler_manage.threading.Thread.start", autospec=True):
+        manager = SchedulerManage()
+
+    model = build_model_info(36)
+    n1 = build_node("a100-0", model, tflops=312.0, mem_gb=80.0, x=0, y=0)
+    n2 = build_node("a100-1", model, tflops=312.0, mem_gb=80.0, x=1, y=0)
+    n3 = build_node("a100-2", model, tflops=312.0, mem_gb=80.0, x=2, y=0)
+    for node in (n1, n2, n3):
+        node.rtt_to_nodes = {}
+
+    scheduler = Scheduler(
+        model, [n1, n2, n3], strategy="greedy", routing_strategy="rr", min_nodes_bootstrapping=3
+    )
+    assert scheduler.bootstrap() is False
+    manager.scheduler = scheduler
+
+    assert manager.get_schedule_status() == NODE_STATUS_WAITING
+
+    set_rtt_from_coords([n1, n2, n3])
+    for node in (n1, n2, n3):
+        scheduler.enqueue_node_update(node.node_id, new_rtt_to_nodes=node.rtt_to_nodes)
+    scheduler._process_node_updates()  # type: ignore[attr-defined]
+
+    assert manager.get_schedule_status() == NODE_STATUS_AVAILABLE
+
+
+def test_get_schedule_status_returns_waiting_without_routable_pipeline():
+    with patch("backend.server.scheduler_manage.threading.Thread.start", autospec=True):
+        manager = SchedulerManage()
+
+    assert manager.get_schedule_status() == NODE_STATUS_WAITING

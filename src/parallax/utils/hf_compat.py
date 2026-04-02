@@ -1,38 +1,88 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
+from functools import lru_cache
 from typing import Any, Dict, Optional
 
 from transformers import AutoConfig, AutoTokenizer
 
-try:
-    from mlx_lm.server import convert_chat as _mlx_convert_chat
-    from mlx_lm.server import process_message_content as _mlx_process_message_content
-except Exception:  # pragma: no cover - optional dependency
-    _mlx_convert_chat = None
-    _mlx_process_message_content = None
+_mlx_convert_chat = None
+_mlx_process_message_content = None
+_BPEStreamingDetokenizer = None
+_NaiveStreamingDetokenizer = None
+_SPMStreamingDetokenizer = None
+_mlx_is_bpe_decoder = None
+_mlx_is_spm_decoder = None
+_mlx_is_spm_decoder_no_space = None
+_mlx_load_tokenizer = None
+_mlx_load_config = None
 
-try:
-    from mlx_lm.tokenizer_utils import BPEStreamingDetokenizer as _BPEStreamingDetokenizer
-    from mlx_lm.tokenizer_utils import NaiveStreamingDetokenizer as _NaiveStreamingDetokenizer
-    from mlx_lm.tokenizer_utils import SPMStreamingDetokenizer as _SPMStreamingDetokenizer
-    from mlx_lm.tokenizer_utils import _is_bpe_decoder as _mlx_is_bpe_decoder
-    from mlx_lm.tokenizer_utils import _is_spm_decoder as _mlx_is_spm_decoder
-    from mlx_lm.tokenizer_utils import _is_spm_decoder_no_space as _mlx_is_spm_decoder_no_space
-    from mlx_lm.tokenizer_utils import load as _mlx_load_tokenizer
-except Exception:  # pragma: no cover - optional dependency
-    _BPEStreamingDetokenizer = None
-    _NaiveStreamingDetokenizer = None
-    _SPMStreamingDetokenizer = None
-    _mlx_is_bpe_decoder = None
-    _mlx_is_spm_decoder = None
-    _mlx_is_spm_decoder_no_space = None
-    _mlx_load_tokenizer = None
 
-try:
-    from mlx_lm.utils import load_config as _mlx_load_config
-except Exception:  # pragma: no cover - optional dependency
-    _mlx_load_config = None
+@lru_cache(maxsize=1)
+def _mlx_lm_import_is_safe() -> bool:
+    """Probe mlx-lm in a subprocess so parent Python cannot abort on MLX init."""
+    if sys.platform != "darwin":
+        return False
+    probe = [
+        sys.executable,
+        "-c",
+        "from mlx_lm.utils import load_config; print('ok')",
+    ]
+    try:
+        result = subprocess.run(
+            probe,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+    except Exception:
+        return False
+    return result.returncode == 0
+
+
+@lru_cache(maxsize=1)
+def _load_mlx_lm_symbols() -> bool:
+    global _mlx_convert_chat
+    global _mlx_process_message_content
+    global _BPEStreamingDetokenizer
+    global _NaiveStreamingDetokenizer
+    global _SPMStreamingDetokenizer
+    global _mlx_is_bpe_decoder
+    global _mlx_is_spm_decoder
+    global _mlx_is_spm_decoder_no_space
+    global _mlx_load_tokenizer
+    global _mlx_load_config
+
+    if not _mlx_lm_import_is_safe():
+        return False
+    try:
+        from mlx_lm.server import convert_chat as mlx_convert_chat
+        from mlx_lm.server import process_message_content as mlx_process_message_content
+        from mlx_lm.tokenizer_utils import BPEStreamingDetokenizer as mlx_bpe_detokenizer
+        from mlx_lm.tokenizer_utils import NaiveStreamingDetokenizer as mlx_naive_detokenizer
+        from mlx_lm.tokenizer_utils import SPMStreamingDetokenizer as mlx_spm_detokenizer
+        from mlx_lm.tokenizer_utils import _is_bpe_decoder as mlx_is_bpe_decoder
+        from mlx_lm.tokenizer_utils import _is_spm_decoder as mlx_is_spm_decoder
+        from mlx_lm.tokenizer_utils import _is_spm_decoder_no_space as mlx_is_spm_decoder_no_space
+        from mlx_lm.tokenizer_utils import load as mlx_load_tokenizer
+        from mlx_lm.utils import load_config as mlx_load_config
+    except Exception:
+        return False
+
+    _mlx_convert_chat = mlx_convert_chat
+    _mlx_process_message_content = mlx_process_message_content
+    _BPEStreamingDetokenizer = mlx_bpe_detokenizer
+    _NaiveStreamingDetokenizer = mlx_naive_detokenizer
+    _SPMStreamingDetokenizer = mlx_spm_detokenizer
+    _mlx_is_bpe_decoder = mlx_is_bpe_decoder
+    _mlx_is_spm_decoder = mlx_is_spm_decoder
+    _mlx_is_spm_decoder_no_space = mlx_is_spm_decoder_no_space
+    _mlx_load_tokenizer = mlx_load_tokenizer
+    _mlx_load_config = mlx_load_config
+    return True
 
 
 class StreamingDetokenizer:
@@ -57,21 +107,30 @@ class StreamingDetokenizer:
 
 
 class NaiveStreamingDetokenizer(
-    _NaiveStreamingDetokenizer if _NaiveStreamingDetokenizer is not None else StreamingDetokenizer
+    StreamingDetokenizer
 ):
-    pass
+    def __new__(cls, tokenizer, tokenmap=None):
+        if cls is NaiveStreamingDetokenizer and _load_mlx_lm_symbols() and _NaiveStreamingDetokenizer:
+            return _NaiveStreamingDetokenizer(tokenizer, tokenmap)
+        return super().__new__(cls)
 
 
 class BPEStreamingDetokenizer(
-    _BPEStreamingDetokenizer if _BPEStreamingDetokenizer is not None else StreamingDetokenizer
+    StreamingDetokenizer
 ):
-    pass
+    def __new__(cls, tokenizer, tokenmap=None):
+        if cls is BPEStreamingDetokenizer and _load_mlx_lm_symbols() and _BPEStreamingDetokenizer:
+            return _BPEStreamingDetokenizer(tokenizer, tokenmap)
+        return super().__new__(cls)
 
 
 class SPMStreamingDetokenizer(
-    _SPMStreamingDetokenizer if _SPMStreamingDetokenizer is not None else StreamingDetokenizer
+    StreamingDetokenizer
 ):
-    pass
+    def __new__(cls, tokenizer, tokenmap=None):
+        if cls is SPMStreamingDetokenizer and _load_mlx_lm_symbols() and _SPMStreamingDetokenizer:
+            return _SPMStreamingDetokenizer(tokenizer, tokenmap)
+        return super().__new__(cls)
 
 
 def _decoder_type(decoder: Dict[str, Any] | None) -> str:
@@ -81,24 +140,28 @@ def _decoder_type(decoder: Dict[str, Any] | None) -> str:
 
 
 def is_bpe_decoder(decoder: Dict[str, Any]) -> bool:
+    _load_mlx_lm_symbols()
     if _mlx_is_bpe_decoder is not None:
         return _mlx_is_bpe_decoder(decoder)
     return _decoder_type(decoder) == "bytelevel"
 
 
 def is_spm_decoder(decoder: Dict[str, Any]) -> bool:
+    _load_mlx_lm_symbols()
     if _mlx_is_spm_decoder is not None:
         return _mlx_is_spm_decoder(decoder)
     return _decoder_type(decoder) == "sequence"
 
 
 def is_spm_decoder_no_space(decoder: Dict[str, Any]) -> bool:
+    _load_mlx_lm_symbols()
     if _mlx_is_spm_decoder_no_space is not None:
         return _mlx_is_spm_decoder_no_space(decoder)
     return False
 
 
 def load_config(model_path) -> Dict[str, Any]:
+    _load_mlx_lm_symbols()
     if _mlx_load_config is not None:
         return _mlx_load_config(model_path)
     config = AutoConfig.from_pretrained(str(model_path), trust_remote_code=True)
@@ -106,6 +169,7 @@ def load_config(model_path) -> Dict[str, Any]:
 
 
 def load_tokenizer(model_path, tokenizer_config_extra=None, trust_remote_code=True, **kwargs):
+    _load_mlx_lm_symbols()
     tokenizer_config_extra = dict(tokenizer_config_extra or {})
     kwargs = dict(kwargs)
     kwargs.pop("eos_token_ids", None)
@@ -156,6 +220,7 @@ def _normalize_message_content(content: Any) -> str:
 
 
 def process_message_content(messages) -> None:
+    _load_mlx_lm_symbols()
     if _mlx_process_message_content is not None:
         _mlx_process_message_content(messages)
         return
@@ -166,6 +231,7 @@ def process_message_content(messages) -> None:
 
 
 def convert_chat(messages, role_mapping: Optional[Dict[str, str]] = None) -> str:
+    _load_mlx_lm_symbols()
     if _mlx_convert_chat is not None:
         return _mlx_convert_chat(messages, role_mapping)
 

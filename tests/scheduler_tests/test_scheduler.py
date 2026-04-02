@@ -42,6 +42,66 @@ def test_scheduler_initialize_and_dispatch():
     assert latency >= 0.0
 
 
+def test_scheduler_rr_bootstrap_waits_for_pipeline_registration():
+    """RR bootstrap should stay incomplete until at least one pipeline registers."""
+    model = build_model_info(36)
+    n1 = build_node("a100-0", model, tflops=312.0, mem_gb=80.0, x=0, y=0)
+    n2 = build_node("a100-1", model, tflops=312.0, mem_gb=80.0, x=1, y=0)
+    n3 = build_node("a100-2", model, tflops=312.0, mem_gb=80.0, x=2, y=0)
+
+    # Simulate the first bootstrap pass before worker RTTs have been reported.
+    for node in (n1, n2, n3):
+        node.rtt_to_nodes = {}
+
+    sched = Scheduler(
+        model, [n1, n2, n3], strategy="greedy", routing_strategy="rr", min_nodes_bootstrapping=3
+    )
+
+    ok = sched.bootstrap()
+    assert not ok
+    assert sched.node_manager.has_full_pipeline(model.num_layers)
+    assert sched.node_manager.list_node_allocations(model.num_layers) == [
+        ("a100-0", 0, 12),
+        ("a100-1", 12, 24),
+        ("a100-2", 24, 36),
+    ]
+    assert sched.node_manager.get_registered_pipeline_node_ids() == {}
+    assert not sched.serving_ready()
+    assert not sched._bootstrapped_event.is_set()
+
+
+def test_scheduler_rr_node_updates_recover_pipeline_registration():
+    """RR bootstrap should complete once node updates provide the missing RTT metadata."""
+    model = build_model_info(36)
+    n1 = build_node("a100-0", model, tflops=312.0, mem_gb=80.0, x=0, y=0)
+    n2 = build_node("a100-1", model, tflops=312.0, mem_gb=80.0, x=1, y=0)
+    n3 = build_node("a100-2", model, tflops=312.0, mem_gb=80.0, x=2, y=0)
+
+    for node in (n1, n2, n3):
+        node.rtt_to_nodes = {}
+
+    sched = Scheduler(
+        model, [n1, n2, n3], strategy="greedy", routing_strategy="rr", min_nodes_bootstrapping=3
+    )
+
+    ok = sched.bootstrap()
+    assert not ok
+    initial_allocations = sched.node_manager.list_node_allocations(model.num_layers)
+
+    set_rtt_from_coords([n1, n2, n3])
+    for node in (n1, n2, n3):
+        sched.enqueue_node_update(node.node_id, new_rtt_to_nodes=node.rtt_to_nodes)
+
+    sched._process_node_updates()  # type: ignore[attr-defined]
+
+    assert sched.node_manager.list_node_allocations(model.num_layers) == initial_allocations
+    assert sched.node_manager.get_registered_pipeline_node_ids() == {
+        0: ["a100-0", "a100-1", "a100-2"]
+    }
+    assert sched.serving_ready()
+    assert sched._bootstrapped_event.is_set()
+
+
 def test_scheduler_join_and_leave():
     """New node can join and be assigned; leave removes it and may rebalance."""
     model = build_model_info(12)
