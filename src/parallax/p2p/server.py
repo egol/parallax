@@ -611,18 +611,42 @@ class GradientServer:
 
                     response = self.scheduler_stub.node_join(node_info)
                     response = response.result(timeout=300)
-                    if response == {}:
-                        raise RuntimeError("Failed to join scheduler")
+                    if not response:
+                        self.status = ServerState.JOINING
+                        if self._shared_state is not None:
+                            self._shared_state.set_status(self.status.value)
+                            self._shared_state.update_metrics(current_requests=0)
+                            self._shared_state.set("model_name", None)
+                            self._shared_state.update_runtime_state(
+                                status=self.status.value,
+                                model_name=None,
+                                init_stage="allocating",
+                                init_detail="Waiting for scheduler layer allocation.",
+                                downloaded_files=None,
+                                total_files=None,
+                                cached_files=None,
+                                ready_bytes=None,
+                                total_bytes=None,
+                                cached_bytes=None,
+                                current_file="",
+                                current_file_bytes=None,
+                                current_file_total_bytes=None,
+                                failure_reason="",
+                            )
+                        logger.warning(
+                            "Join scheduler returned no layer allocation yet; "
+                            "continuing with JOINING state and waiting for heartbeat updates."
+                        )
+                    else:
+                        logger.info(f"Join scheduler response: {response}")
 
-                    logger.info(f"Join scheduler response: {response}")
-
-                    if not self.manual_layer_assignment:
-                        self.block_start_index = response.get("start_layer")
-                        self.block_end_index = response.get("end_layer")
-                    self.model_name = response.get("model_name")
-                    self.tp_size = response.get("tp_size")
-                    self.enable_weight_refit = response.get("enable_weight_refit")
-                    self.weight_refit_mode = response.get("weight_refit_mode")
+                        if not self.manual_layer_assignment:
+                            self.block_start_index = response.get("start_layer")
+                            self.block_end_index = response.get("end_layer")
+                        self.model_name = response.get("model_name")
+                        self.tp_size = response.get("tp_size")
+                        self.enable_weight_refit = response.get("enable_weight_refit")
+                        self.weight_refit_mode = response.get("weight_refit_mode")
 
                     # Sync to shared state if available
                     self._sync_to_shared_state()

@@ -288,6 +288,7 @@ if __name__ == "__main__":
             logger.debug("Waiting for layer allocation from scheduler...")
             max_wait_time = 300  # 5 minutes
             wait_start = time.time()
+            has_warned_about_join_timeout = False
             while True:
                 model_info = shared_state.get_model_info()
                 if (
@@ -296,15 +297,15 @@ if __name__ == "__main__":
                     and model_info["model_name"] is not None
                 ):
                     break
-                if time.time() - wait_start > max_wait_time:
-                    logger.error("Timeout waiting for layer allocation from scheduler")
-                    shared_state.update_runtime_state(
-                        status=ServerState.JOINING.value,
-                        init_stage="failed",
-                        init_detail="Timed out waiting for layer allocation from the scheduler.",
-                        failure_reason="Failed to get layer allocation from scheduler",
+                if time.time() - wait_start > max_wait_time and not has_warned_about_join_timeout:
+                    logger.warning(
+                        "Still waiting for layer allocation from scheduler; "
+                        "worker is still alive and will keep heartbeating while waiting."
                     )
-                    raise RuntimeError("Failed to get layer allocation from scheduler")
+                    has_warned_about_join_timeout = True
+                if p2p_server_process is not None and not p2p_server_process.is_alive():
+                    logger.error("P2P server process exited before layer allocation was assigned.")
+                    raise RuntimeError("P2P server process exited before layer allocation was assigned.")
                 time.sleep(1)
 
             # Get layer allocation from shared state
