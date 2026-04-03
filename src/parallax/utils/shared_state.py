@@ -12,6 +12,27 @@ import time
 from typing import Any, Dict, Optional, Union
 
 
+def _default_runtime_state(updated_at: Optional[str] = None) -> Dict[str, Any]:
+    timestamp = updated_at or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    return {
+        "status": None,
+        "model_name": None,
+        "init_stage": "idle",
+        "init_detail": "",
+        "downloaded_files": None,
+        "total_files": None,
+        "cached_files": None,
+        "ready_bytes": None,
+        "total_bytes": None,
+        "cached_bytes": None,
+        "current_file": "",
+        "current_file_bytes": None,
+        "current_file_total_bytes": None,
+        "failure_reason": "",
+        "updated_at": timestamp,
+    }
+
+
 class SharedState:
     """Wrapper for multiprocessing.Manager().dict() with dict-like interface.
 
@@ -154,15 +175,11 @@ class SharedState:
         runtime_dict = self._dict.get("runtime_state")
         if not runtime_dict:
             raise RuntimeError("runtime_state not initialized in shared_state")
-        runtime_dict["status"] = self._dict.get("status")
-        runtime_dict["model_name"] = self._dict.get("model_name")
-        runtime_dict["init_stage"] = "idle"
-        runtime_dict["init_detail"] = ""
-        runtime_dict["downloaded_files"] = None
-        runtime_dict["total_files"] = None
-        runtime_dict["current_file"] = ""
-        runtime_dict["failure_reason"] = ""
-        runtime_dict["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        defaults = _default_runtime_state()
+        defaults["status"] = self._dict.get("status")
+        defaults["model_name"] = self._dict.get("model_name")
+        for key, value in defaults.items():
+            runtime_dict[key] = value
 
     @classmethod
     def create(cls) -> "SharedState":
@@ -190,17 +207,6 @@ class SharedState:
         shared_dict["metrics"]["layer_latency_ms"] = None
         shared_dict["metrics"]["_last_update_ts"] = 0.0
 
-        shared_dict["runtime_state"] = manager.dict()
-        shared_dict["runtime_state"]["status"] = None
-        shared_dict["runtime_state"]["model_name"] = None
-        shared_dict["runtime_state"]["init_stage"] = "idle"
-        shared_dict["runtime_state"]["init_detail"] = ""
-        shared_dict["runtime_state"]["downloaded_files"] = None
-        shared_dict["runtime_state"]["total_files"] = None
-        shared_dict["runtime_state"]["current_file"] = ""
-        shared_dict["runtime_state"]["failure_reason"] = ""
-        shared_dict["runtime_state"]["updated_at"] = time.strftime(
-            "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
-        )
+        shared_dict["runtime_state"] = manager.dict(_default_runtime_state())
 
         return cls(shared_dict)

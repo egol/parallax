@@ -362,7 +362,13 @@ if __name__ == "__main__":
                                 init_detail="Layer allocation changed; reloading the worker.",
                                 downloaded_files=None,
                                 total_files=None,
+                                cached_files=None,
+                                ready_bytes=None,
+                                total_bytes=None,
+                                cached_bytes=None,
                                 current_file="",
+                                current_file_bytes=None,
+                                current_file_total_bytes=None,
                                 failure_reason="",
                             )
                             if http_server_process is not None:
@@ -394,7 +400,13 @@ if __name__ == "__main__":
                             init_detail="Layer allocation changed; reloading the executor.",
                             downloaded_files=None,
                             total_files=None,
+                            cached_files=None,
+                            ready_bytes=None,
+                            total_bytes=None,
+                            cached_bytes=None,
                             current_file="",
+                            current_file_bytes=None,
+                            current_file_total_bytes=None,
                             failure_reason="",
                         )
                         _stop_executor_processes(executor_subprocs)

@@ -3,7 +3,7 @@ import os
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from lattica import Lattica
 
@@ -353,6 +353,7 @@ class SchedulerManage:
         stage_lookup: Dict[str, int] = {}
         pipelines: List[Dict[str, Any]] = []
         edges: List[Dict[str, Any]] = []
+        ready_pipeline_node_ids: Set[str] = set()
 
         for pipeline_id, pipeline in sorted(registered_pipelines.items()):
             pipeline.recompute_capacity()
@@ -370,6 +371,8 @@ class SchedulerManage:
                     "node_ids": list(pipeline.node_ids),
                 }
             )
+            if pipeline.is_ready:
+                ready_pipeline_node_ids.update(node.node_id for node in pipeline.nodes)
             for stage_index, node in enumerate(pipeline.nodes):
                 pipeline_membership[node.node_id] = pipeline_id
                 stage_lookup[node.node_id] = stage_index
@@ -405,6 +408,7 @@ class SchedulerManage:
             nodes,
             discovered_memory_gb=discovered_memory_gb,
             registered_memory_gb=registered_memory_gb,
+            ready_pipeline_node_ids=ready_pipeline_node_ids,
         )
 
         return {
@@ -538,7 +542,13 @@ class SchedulerManage:
             "init_detail": runtime.get("init_detail", "") or "",
             "downloaded_files": runtime.get("downloaded_files"),
             "total_files": runtime.get("total_files"),
+            "cached_files": runtime.get("cached_files"),
+            "ready_bytes": runtime.get("ready_bytes"),
+            "total_bytes": runtime.get("total_bytes"),
+            "cached_bytes": runtime.get("cached_bytes"),
             "current_file": runtime.get("current_file", "") or "",
+            "current_file_bytes": runtime.get("current_file_bytes"),
+            "current_file_total_bytes": runtime.get("current_file_total_bytes"),
             "updated_at": runtime.get("updated_at", "") or "",
             "failure_reason": runtime.get("failure_reason", "") or "",
         }
@@ -555,6 +565,7 @@ class SchedulerManage:
         *,
         discovered_memory_gb: float,
         registered_memory_gb: float,
+        ready_pipeline_node_ids: Optional[Set[str]] = None,
     ) -> Dict[str, Any]:
         runtime_nodes = [
             node
@@ -573,13 +584,21 @@ class SchedulerManage:
                 "cluster_runtime_updated_at": "",
             }
 
+        summary_nodes = runtime_nodes
+        if ready_pipeline_node_ids:
+            serving_runtime_nodes = [
+                node for node in runtime_nodes if node.get("node_id") in ready_pipeline_node_ids
+            ]
+            if serving_runtime_nodes:
+                summary_nodes = serving_runtime_nodes
+
         min_priority = min(
             self._runtime_stage_priority(node["runtime"].get("init_stage", "idle"))
-            for node in runtime_nodes
+            for node in summary_nodes
         )
         stage_candidates = [
             node
-            for node in runtime_nodes
+            for node in summary_nodes
             if self._runtime_stage_priority(node["runtime"].get("init_stage", "idle"))
             == min_priority
         ]
@@ -588,16 +607,16 @@ class SchedulerManage:
             key=lambda node: node["runtime"].get("updated_at", ""),
         )
         most_recent_node = max(
-            runtime_nodes,
+            summary_nodes,
             key=lambda node: node["runtime"].get("updated_at", ""),
         )
         counted_nodes = [
             node
-            for node in runtime_nodes
+            for node in summary_nodes
             if node["runtime"].get("downloaded_files") is not None
             and node["runtime"].get("total_files") is not None
         ]
-        if counted_nodes and len(counted_nodes) == len(runtime_nodes):
+        if counted_nodes and len(counted_nodes) == len(summary_nodes):
             downloaded_files = sum(
                 int(node["runtime"].get("downloaded_files") or 0) for node in counted_nodes
             )
@@ -611,7 +630,7 @@ class SchedulerManage:
         stage = stage_node["runtime"].get("init_stage", "idle") or "idle"
         updated_at_values = [
             node["runtime"].get("updated_at", "")
-            for node in runtime_nodes
+            for node in summary_nodes
             if node["runtime"].get("updated_at")
         ]
         latest_runtime_updated_at = most_recent_node["runtime"].get("updated_at", "") or ""
@@ -643,7 +662,15 @@ class SchedulerManage:
                 "updated_at": most_recent_node["runtime"].get("updated_at", "") or "",
                 "downloaded_files": downloaded_files,
                 "total_files": total_files,
+                "cached_files": stage_node["runtime"].get("cached_files"),
+                "ready_bytes": stage_node["runtime"].get("ready_bytes"),
+                "total_bytes": stage_node["runtime"].get("total_bytes"),
+                "cached_bytes": stage_node["runtime"].get("cached_bytes"),
                 "current_file": most_recent_node["runtime"].get("current_file", "") or "",
+                "current_file_bytes": most_recent_node["runtime"].get("current_file_bytes"),
+                "current_file_total_bytes": most_recent_node["runtime"].get(
+                    "current_file_total_bytes"
+                ),
                 "last_progress_at": latest_runtime_updated_at,
                 "failure_reason": stage_node["runtime"].get("failure_reason", "") or "",
                 "source_node_id": stage_node.get("node_id", "") or "",

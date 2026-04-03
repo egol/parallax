@@ -34,6 +34,12 @@ logger = get_logger(__name__)
 
 # Global HTTP client for reuse
 _http_client = None
+_DEFAULT_NODE_ANNOUNCE_INTERVAL_SEC = float(
+    os.environ.get("PARALLAX_NODE_ANNOUNCE_INTERVAL_SEC", "10.0")
+)
+_ACTIVE_INIT_NODE_ANNOUNCE_INTERVAL_SEC = float(
+    os.environ.get("PARALLAX_NODE_INIT_ANNOUNCE_INTERVAL_SEC", "1.0")
+)
 
 
 def resolve_lattica_key_path(default: Optional[str] = None) -> Optional[str]:
@@ -425,6 +431,14 @@ class GradientServer:
         self._max_build_attempts = 3
         self._max_join_attempts = 3
 
+    def _node_announce_interval_seconds(self) -> float:
+        if hasattr(self, "_shared_state") and self._shared_state is not None:
+            runtime_state = self._shared_state.get_runtime_state()
+            init_stage = runtime_state.get("init_stage")
+            if init_stage in {"resolving-metadata", "downloading", "loading-shards"}:
+                return _ACTIVE_INIT_NODE_ANNOUNCE_INTERVAL_SEC
+        return _DEFAULT_NODE_ANNOUNCE_INTERVAL_SEC
+
     def _sync_to_shared_state(self):
         """Sync current layer allocation and status to shared state if available"""
         if hasattr(self, "_shared_state") and self._shared_state is not None:
@@ -621,7 +635,7 @@ class GradientServer:
                     self._close_lattica()
                     if attempt == self._max_join_attempts:
                         raise RuntimeError("Failed to join scheduler after retries") from e
-                    time.sleep(10)
+                    time.sleep(self._node_announce_interval_seconds())
                     self._build_lattica_with_retry()
             if last_error is not None and self.scheduler_stub is None:
                 raise RuntimeError("Failed to initialize scheduler connection") from last_error
@@ -891,7 +905,13 @@ class GradientServer:
                                                 init_detail="Layer allocation changed. Reloading the executor with the new assignment.",
                                                 downloaded_files=None,
                                                 total_files=None,
+                                                cached_files=None,
+                                                ready_bytes=None,
+                                                total_bytes=None,
+                                                cached_bytes=None,
                                                 current_file="",
+                                                current_file_bytes=None,
+                                                current_file_total_bytes=None,
                                                 failure_reason="",
                                             )
 
@@ -921,7 +941,13 @@ class GradientServer:
                                         init_detail="Waiting for scheduler layer allocation.",
                                         downloaded_files=None,
                                         total_files=None,
+                                        cached_files=None,
+                                        ready_bytes=None,
+                                        total_bytes=None,
+                                        cached_bytes=None,
                                         current_file="",
+                                        current_file_bytes=None,
+                                        current_file_total_bytes=None,
                                         failure_reason="",
                                     )
                                 logger.debug(
@@ -1072,7 +1098,13 @@ class GradientServer:
                 init_detail="Worker is offline.",
                 downloaded_files=None,
                 total_files=None,
+                cached_files=None,
+                ready_bytes=None,
+                total_bytes=None,
+                cached_bytes=None,
                 current_file="",
+                current_file_bytes=None,
+                current_file_total_bytes=None,
                 failure_reason="",
             )
         if self.scheduler_addr is not None:
@@ -1169,7 +1201,13 @@ def _run_p2p_server_process(
                 ),
                 downloaded_files=None,
                 total_files=None,
+                cached_files=None,
+                ready_bytes=None,
+                total_bytes=None,
+                cached_bytes=None,
                 current_file="",
+                current_file_bytes=None,
+                current_file_total_bytes=None,
                 failure_reason="",
             )
 
