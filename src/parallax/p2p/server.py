@@ -1021,9 +1021,13 @@ class GradientServer:
 
             if len(all_peers) == 0 or self.scheduler_peer_id not in all_peers:
                 logger.warning(
-                    "No peers found or scheduler peer id not found, return empty node info."
+                    "No peers found or scheduler peer id not found."
                 )
-                return {}
+                if not is_update:
+                    logger.warning(
+                        "Returning empty node info because this is not an update heartbeat."
+                    )
+                    return {}
 
             for peer_id in all_peers:
                 rtt = None
