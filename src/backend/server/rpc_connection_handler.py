@@ -175,14 +175,22 @@ class RPCConnectionHandler(ConnectionHandler):
 
     @rpc_stream_iter
     def cluster_status(self):
+        if self.scheduler_manage is None:
+            yield json.dumps({"error": "internal server error"}).encode()
+            return
+
         try:
-            with httpx.Client(timeout=10 * 60, proxy=None, trust_env=False) as client:
-                with client.stream(
-                    "GET", f"http://127.0.0.1:{self.http_port}/cluster/status"
-                ) as response:
-                    for chunk in response.iter_bytes():
-                        if chunk:
-                            yield chunk
+            snapshot = self.scheduler_manage.get_cluster_status()
+            yield json.dumps(snapshot, ensure_ascii=False).encode() + b"\n"
+            version = snapshot.get("data", {}).get("snapshot_version", 0)
+            while True:
+                snapshot = self.scheduler_manage.wait_for_cluster_status_version(
+                    version, 30.0
+                )
+                if snapshot is None:
+                    continue
+                version = snapshot.get("data", {}).get("snapshot_version", version)
+                yield json.dumps(snapshot, ensure_ascii=False).encode() + b"\n"
         except Exception as e:
             logger.exception(f"Error in cluster status: {e}")
             yield json.dumps({"error": "internal server error"}).encode()
