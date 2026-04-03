@@ -55,6 +55,9 @@ EXCLUDE_WEIGHT_PATTERNS = [
 _DOWNLOAD_PROGRESS_THROTTLE_SEC = float(
     os.environ.get("PARALLAX_DOWNLOAD_PROGRESS_THROTTLE_SEC", "0.25")
 )
+_HF_HUB_DOWNLOAD_SUPPORTS_TQDM_CLASS = (
+    "tqdm_class" in inspect.signature(hf_hub_download).parameters
+)
 
 
 @dataclass
@@ -453,17 +456,21 @@ def _download_weight_files(
             "Downloading weight file %d/%d: %s", index, total_weight_files, manifest.repo_path
         )
         try:
-            hf_hub_download(
-                repo_id=repo_id,
-                filename=manifest.repo_path,
-                cache_dir=cache_dir,
-                force_download=force_download,
-                local_files_only=local_files_only,
-                tqdm_class=lambda **kwargs: _RuntimeProgressBar(
+            download_kwargs = {
+                "repo_id": repo_id,
+                "filename": manifest.repo_path,
+                "cache_dir": cache_dir,
+                "force_download": force_download,
+                "local_files_only": local_files_only,
+            }
+            if _HF_HUB_DOWNLOAD_SUPPORTS_TQDM_CLASS:
+                download_kwargs["tqdm_class"] = lambda **kwargs: _RuntimeProgressBar(
                     tracker=progress_tracker,
                     file_name=manifest.file_name,
                     **kwargs,
-                ),
+                )
+            hf_hub_download(
+                **download_kwargs,
             )
         except Exception as e:
             logger.error(f"Failed to download {manifest.repo_path} for {repo_id}: {e}")
