@@ -418,6 +418,9 @@ class GradientServer:
         self.status = ServerState.JOINING
         self.manual_layer_assignment = block_end_index is not None and block_start_index is not None
         self.conn = conn
+        self.display_name = os.getenv("PARALLAX_DISPLAY_NAME", "").strip()
+        self.role = os.getenv("PARALLAX_ROLE", "").strip()
+        self.joined_at = time.time()
 
         self.scheduler_stub = None
         self.scheduler_peer_id = None
@@ -1081,6 +1084,9 @@ class GradientServer:
             "status": self._get_status(),
             "is_active": self._get_status() == ServerState.READY.value,
             "last_refit_time": self.last_refit_time,
+            "display_name": self.display_name,
+            "role": self.role,
+            "joined_at": self.joined_at,
         }
 
         if hasattr(self, "_shared_state") and self._shared_state is not None:

@@ -332,6 +332,7 @@ class SchedulerManage:
                 "nodes": discovered_nodes,
                 "pipelines": [],
                 "edges": [],
+                "routing_blockers": [],
                 "totals": {
                     "registered_pipelines": 0,
                     "ready_pipelines": 0,
@@ -353,6 +354,7 @@ class SchedulerManage:
         stage_lookup: Dict[str, int] = {}
         pipelines: List[Dict[str, Any]] = []
         edges: List[Dict[str, Any]] = []
+        routing_blockers: List[Dict[str, Any]] = []
         ready_pipeline_node_ids: Set[str] = set()
 
         for pipeline_id, pipeline in sorted(registered_pipelines.items()):
@@ -371,6 +373,9 @@ class SchedulerManage:
                     "node_ids": list(pipeline.node_ids),
                 }
             )
+            routing_blockers.extend(
+                self._collect_routing_blockers_for_path(pipeline.nodes, pipeline_id=pipeline_id)
+            )
             if pipeline.is_ready:
                 ready_pipeline_node_ids.update(node.node_id for node in pipeline.nodes)
             for stage_index, node in enumerate(pipeline.nodes):
@@ -386,6 +391,11 @@ class SchedulerManage:
                             "target": node.node_id,
                         }
                     )
+
+        if not routing_blockers and not pipelines:
+            routing_blockers.extend(
+                self._collect_routing_blockers_for_path(self._allocated_path_nodes())
+            )
 
         nodes = [
             self.build_node_info(
@@ -415,6 +425,7 @@ class SchedulerManage:
             "nodes": nodes,
             "pipelines": pipelines,
             "edges": edges,
+            "routing_blockers": self._dedupe_routing_blockers(routing_blockers),
             "totals": {
                 "registered_pipelines": len(pipelines),
                 "ready_pipelines": sum(1 for pipeline in pipelines if pipeline["ready"]),
@@ -447,9 +458,11 @@ class SchedulerManage:
         if not node_id:
             return
         previous_payload = self.discovered_nodes.get(node_id, {}).get("payload")
+        first_seen = self.discovered_nodes.get(node_id, {}).get("first_seen", time.time())
         next_payload = {
             "payload": dict(node_payload),
             "last_seen": time.time(),
+            "first_seen": first_seen,
         }
         changed = previous_payload != next_payload["payload"]
         self.discovered_nodes[node_id] = next_payload
@@ -513,6 +526,38 @@ class SchedulerManage:
         if status in {"joining", "initializing"}:
             return "allocating"
         return "idle"
+
+    def _discovered_entry_for_node(self, node_id: str) -> Optional[Dict[str, Any]]:
+        if not node_id:
+            return None
+        entry = self.discovered_nodes.get(node_id)
+        return entry if isinstance(entry, dict) else None
+
+    def _node_identity_metadata(self, node_id: str) -> tuple[str, str, float]:
+        entry = self._discovered_entry_for_node(node_id)
+        if not entry:
+            return "", "", 0.0
+
+        payload = entry.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+
+        display_name = payload.get("display_name")
+        role = payload.get("role")
+        joined_at = payload.get("joined_at")
+        if joined_at in (None, "", 0):
+            joined_at = entry.get("first_seen", 0.0)
+
+        try:
+            joined_at_value = float(joined_at)
+        except (TypeError, ValueError):
+            joined_at_value = 0.0
+
+        return (
+            display_name if isinstance(display_name, str) else "",
+            role if isinstance(role, str) else "",
+            joined_at_value,
+        )
 
     def _runtime_stage_priority(self, stage: str) -> int:
         priorities = {
@@ -679,6 +724,110 @@ class SchedulerManage:
             "cluster_runtime_updated_at": latest_runtime_updated_at,
         }
 
+    def _cached_rtt_ms(self, source, target) -> Optional[float]:
+        if source.node_id == target.node_id:
+            return 0.0
+
+        source_rtts = source.rtt_to_nodes if isinstance(source.rtt_to_nodes, dict) else {}
+        if target.node_id in source_rtts:
+            try:
+                return float(source_rtts[target.node_id])
+            except (TypeError, ValueError):
+                return None
+
+        target_rtts = target.rtt_to_nodes if isinstance(target.rtt_to_nodes, dict) else {}
+        if source.node_id in target_rtts:
+            try:
+                return float(target_rtts[source.node_id])
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    def _routing_blocker_for_nodes(
+        self, source, target, *, pipeline_id: Optional[int] = None
+    ) -> Optional[Dict[str, Any]]:
+        if self._cached_rtt_ms(source, target) is not None:
+            return None
+
+        source_name, _, _ = self._node_identity_metadata(source.node_id)
+        target_name, _, _ = self._node_identity_metadata(target.node_id)
+        source_label = source_name or source.node_id
+        target_label = target_name or target.node_id
+        return {
+            "pipeline_id": pipeline_id,
+            "source_node_id": source.node_id,
+            "target_node_id": target.node_id,
+            "source_start_layer": source.start_layer,
+            "source_end_layer": source.end_layer,
+            "target_start_layer": target.start_layer,
+            "target_end_layer": target.end_layer,
+            "reason": "missing-rtt",
+            "detail": (
+                f"Missing RTT between {source_label} layers "
+                f"[{source.start_layer}, {source.end_layer}) and {target_label} layers "
+                f"[{target.start_layer}, {target.end_layer}). Workers can reach the scheduler, "
+                "but this serving hop is not routable yet."
+            ),
+        }
+
+    def _collect_routing_blockers_for_path(
+        self, nodes: List[Any], *, pipeline_id: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        blockers: List[Dict[str, Any]] = []
+        for index in range(1, len(nodes)):
+            blocker = self._routing_blocker_for_nodes(
+                nodes[index - 1], nodes[index], pipeline_id=pipeline_id
+            )
+            if blocker is not None:
+                blockers.append(blocker)
+        return blockers
+
+    def _allocated_path_nodes(self) -> List[Any]:
+        if self.scheduler is None:
+            return []
+
+        total_layers = self.scheduler.model_info.num_layers
+        allocated_nodes = [
+            node
+            for node in self.scheduler.node_manager.nodes
+            if node.is_active and node.start_layer is not None and node.end_layer is not None
+        ]
+        if not allocated_nodes:
+            return []
+
+        allocated_nodes.sort(key=lambda node: (node.start_layer, node.end_layer, node.node_id))
+        path: List[Any] = []
+        next_start = 0
+        for node in allocated_nodes:
+            if node.start_layer != next_start:
+                return []
+            path.append(node)
+            next_start = node.end_layer
+            if next_start >= total_layers:
+                break
+
+        if next_start != total_layers:
+            return []
+        return path
+
+    def _dedupe_routing_blockers(
+        self, blockers: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        deduped: List[Dict[str, Any]] = []
+        seen: Set[tuple[Optional[int], str, str, str]] = set()
+        for blocker in blockers:
+            key = (
+                blocker.get("pipeline_id"),
+                blocker.get("source_node_id", ""),
+                blocker.get("target_node_id", ""),
+                blocker.get("reason", ""),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(blocker)
+        return deduped
+
     def build_node_info(
         self,
         node,
@@ -687,6 +836,7 @@ class SchedulerManage:
         stage_index: Optional[int] = None,
     ):
         latency_ms = node.layer_latency_ms
+        display_name, role, joined_at = self._node_identity_metadata(node.node_id)
         return {
             "node_id": node.node_id,
             "status": NODE_STATUS_AVAILABLE if node.is_active else NODE_STATUS_WAITING,
@@ -708,6 +858,9 @@ class SchedulerManage:
             "stage_index": stage_index,
             "is_active": node.is_active,
             "layer_latency_ms": None if latency_ms == float("inf") else latency_ms,
+            "display_name": display_name,
+            "role": role,
+            "joined_at": joined_at,
             "runtime": self._runtime_snapshot_for_node(node.node_id),
         }
 
@@ -715,8 +868,10 @@ class SchedulerManage:
         hardware = node_payload.get("hardware", {})
         if not isinstance(hardware, dict):
             hardware = {}
+        node_id = self._extract_node_id(node_payload) or ""
+        display_name, role, joined_at = self._node_identity_metadata(node_id)
         return {
-            "node_id": self._extract_node_id(node_payload) or "",
+            "node_id": node_id,
             "status": NODE_STATUS_WAITING,
             "source": "discovered",
             "gpu_num": hardware.get("num_gpus", 0),
@@ -732,6 +887,9 @@ class SchedulerManage:
             "stage_index": None,
             "is_active": bool(node_payload.get("is_active", False)),
             "layer_latency_ms": node_payload.get("layer_latency_ms"),
+            "display_name": display_name,
+            "role": role,
+            "joined_at": joined_at,
             "runtime": self._runtime_snapshot_from_payload(node_payload),
         }
 
@@ -765,6 +923,7 @@ class SchedulerManage:
                     "nodes": [],
                     "pipelines": [],
                     "edges": [],
+                    "routing_blockers": [],
                     "totals": {
                         "registered_pipelines": 0,
                         "ready_pipelines": 0,

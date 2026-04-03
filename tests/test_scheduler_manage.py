@@ -262,3 +262,61 @@ def test_get_schedule_status_returns_waiting_without_routable_pipeline():
         manager = SchedulerManage()
 
     assert manager.get_schedule_status() == NODE_STATUS_WAITING
+
+
+def test_topology_snapshot_reports_missing_rtt_blockers_and_registered_metadata():
+    with patch("backend.server.scheduler_manage.threading.Thread.start", autospec=True):
+        manager = SchedulerManage()
+
+    model = build_model_info(36)
+    n1 = build_node("a100-0", model, tflops=312.0, mem_gb=80.0, x=0, y=0)
+    n2 = build_node("a100-1", model, tflops=312.0, mem_gb=80.0, x=1, y=0)
+    n3 = build_node("a100-2", model, tflops=312.0, mem_gb=80.0, x=2, y=0)
+    set_rtt_from_coords([n1, n2, n3])
+    del n2.rtt_to_nodes[n3.node_id]
+    del n3.rtt_to_nodes[n2.node_id]
+
+    scheduler = Scheduler(
+        model, [n1, n2, n3], strategy="greedy", routing_strategy="rr", min_nodes_bootstrapping=3
+    )
+    assert scheduler.bootstrap() is False
+    manager.scheduler = scheduler
+
+    manager.register_discovered_node(
+        {
+            "node_id": n2.node_id,
+            "display_name": "mid-worker",
+            "role": "compute-node",
+            "joined_at": 1712100000.0,
+            "hardware": {
+                "node_id": n2.node_id,
+                "num_gpus": 1,
+                "gpu_name": n2.hardware.gpu_name,
+                "memory_gb": n2.hardware.memory_gb,
+                "device": n2.hardware.device,
+            },
+        }
+    )
+
+    topology = manager.get_topology_snapshot(None, total_capacity=0, current_capacity=0)
+
+    assert topology["routing_blockers"] == [
+        {
+            "pipeline_id": None,
+            "source_node_id": n2.node_id,
+            "target_node_id": n3.node_id,
+            "source_start_layer": 12,
+            "source_end_layer": 24,
+            "target_start_layer": 24,
+            "target_end_layer": 36,
+            "reason": "missing-rtt",
+            "detail": (
+                f"Missing RTT between mid-worker layers [12, 24) and {n3.node_id} layers [24, 36). "
+                "Workers can reach the scheduler, but this serving hop is not routable yet."
+            ),
+        }
+    ]
+    registered_mid = next(node for node in topology["nodes"] if node["node_id"] == n2.node_id)
+    assert registered_mid["display_name"] == "mid-worker"
+    assert registered_mid["role"] == "compute-node"
+    assert registered_mid["joined_at"] == 1712100000.0
