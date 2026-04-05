@@ -46,6 +46,7 @@ class Scheduler:
         inactive_heartbeat_timeout: Optional[float] = None,
         trim_layers_on_turning_points: bool = False,
         state_change_callback: Optional[Callable[[str], None]] = None,
+        centralized_proxy_peer_id: Optional[str] = None,
     ) -> None:
         """Initialize the scheduler.
 
@@ -68,6 +69,7 @@ class Scheduler:
         self.model_info = model_info
         self.num_layers = model_info.num_layers
         self.routing_strategy: Literal["rr", "dp"] = routing_strategy
+        self.centralized_proxy_peer_id = centralized_proxy_peer_id
         self.enable_weight_refit = enable_weight_refit
         self.weight_refit_mode = weight_refit_mode
         self.refit_request = {}
@@ -90,10 +92,17 @@ class Scheduler:
         self.min_nodes_bootstrapping = min_nodes_bootstrapping
 
         self.request_router = (
-            DynamicProgrammingRouting(self.node_manager, self.num_layers)
+            DynamicProgrammingRouting(
+                self.node_manager,
+                self.num_layers,
+                centralized_proxy_peer_id=self.centralized_proxy_peer_id,
+            )
             if routing_strategy == "dp"
             else RoundRobinOverFixedPipelinesRouting(
-                self.node_manager, self.num_layers, self.layer_allocator
+                self.node_manager,
+                self.num_layers,
+                self.layer_allocator,
+                centralized_proxy_peer_id=self.centralized_proxy_peer_id,
             )
         )
 

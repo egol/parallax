@@ -50,20 +50,30 @@ def _coerce_init_nodes_num(value):
     return init_nodes_num
 
 
-def _coerce_is_local_network(value):
+def _coerce_network_mode(request_data):
+    network_mode = request_data.get("network_mode")
+    if isinstance(network_mode, str):
+        normalized = network_mode.strip().lower()
+        if normalized in {"centralized", "relay"}:
+            return normalized
+        if normalized in {"local", "lan-bootstrap"}:
+            return "centralized"
+        raise ValueError("network_mode must be 'centralized' or 'relay'")
+
+    value = request_data.get("is_local_network")
     if value is None:
         if scheduler_manage is not None:
-            return scheduler_manage.get_is_local_network()
-        return True
+            return scheduler_manage.get_network_mode()
+        return "centralized"
     if isinstance(value, bool):
-        return value
+        return "centralized" if value else "relay"
     if isinstance(value, str):
         normalized = value.strip().lower()
         if normalized in {"1", "true", "yes", "on"}:
-            return True
+            return "centralized"
         if normalized in {"0", "false", "no", "off"}:
-            return False
-    raise ValueError("is_local_network must be a boolean")
+            return "relay"
+    raise ValueError("network_mode must be 'centralized' or 'relay'")
 
 
 async def _validate_scheduler_init_request(request_data):
@@ -73,7 +83,7 @@ async def _validate_scheduler_init_request(request_data):
     model_name = model_name.strip()
 
     init_nodes_num = _coerce_init_nodes_num(request_data.get("init_nodes_num"))
-    is_local_network = _coerce_is_local_network(request_data.get("is_local_network"))
+    network_mode = _coerce_network_mode(request_data)
 
     try:
         model_info = await asyncio.to_thread(
@@ -84,7 +94,7 @@ async def _validate_scheduler_init_request(request_data):
     if model_info is None:
         raise ValueError(f"model_name is invalid or unavailable: {model_name}")
 
-    return model_name, init_nodes_num, is_local_network
+    return model_name, init_nodes_num, network_mode
 
 
 @app.post("/weight/refit")
@@ -145,7 +155,7 @@ async def scheduler_init(raw_request: Request):
 
     request_data = await raw_request.json()
     try:
-        model_name, init_nodes_num, is_local_network = await _validate_scheduler_init_request(
+        model_name, init_nodes_num, network_mode = await _validate_scheduler_init_request(
             request_data
         )
     except ValueError as exc:
@@ -172,7 +182,7 @@ async def scheduler_init(raw_request: Request):
         # block for seconds. Run it off the event loop so status/model endpoints stay
         # responsive during allocation and downloads.
         await asyncio.to_thread(
-            scheduler_manage.run, model_name, init_nodes_num, is_local_network
+            scheduler_manage.run, model_name, init_nodes_num, network_mode
         )
 
         return JSONResponse(
@@ -196,12 +206,21 @@ async def scheduler_init(raw_request: Request):
 @app.post("/scheduler/bootstrap")
 async def scheduler_bootstrap(raw_request: Request):
     request_data = await raw_request.json()
-    is_local_network = request_data.get("is_local_network", True)
+    try:
+        network_mode = _coerce_network_mode(request_data)
+    except ValueError as exc:
+        return JSONResponse(
+            content={
+                "type": "scheduler_bootstrap",
+                "error": str(exc),
+            },
+            status_code=400,
+        )
 
     try:
         # `bootstrap_network()` can block while the local P2P node advertises and
         # registers services. Keep the HTTP event loop free so probes can continue.
-        await asyncio.to_thread(scheduler_manage.bootstrap_network, is_local_network)
+        await asyncio.to_thread(scheduler_manage.bootstrap_network, network_mode)
         return JSONResponse(
             content={
                 "type": "scheduler_bootstrap",
@@ -223,12 +242,12 @@ async def scheduler_bootstrap(raw_request: Request):
 @app.get("/node/join/command")
 async def node_join_command():
     peer_id = scheduler_manage.get_peer_id()
-    is_local_network = scheduler_manage.get_is_local_network()
+    network_mode = scheduler_manage.get_network_mode()
 
     return JSONResponse(
         content={
             "type": "node_join_command",
-            "data": get_node_join_command(peer_id, is_local_network),
+            "data": get_node_join_command(peer_id, network_mode),
         },
         status_code=200,
     )
@@ -324,9 +343,9 @@ if __name__ == "__main__":
 
     model_name = args.model_name
     init_nodes_num = args.init_nodes_num
-    is_local_network = args.is_local_network
+    network_mode = "centralized" if args.is_local_network else "relay"
     if model_name is not None and init_nodes_num is not None:
-        scheduler_manage.run(model_name, init_nodes_num, is_local_network)
+        scheduler_manage.run(model_name, init_nodes_num, network_mode)
 
     host = args.host
     port = args.port

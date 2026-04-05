@@ -57,8 +57,29 @@ from scheduling.node_management import NodeManager
 logger = get_logger(__name__)
 
 
+def transition_latency_ms(
+    source: Node,
+    target: Node,
+    *,
+    centralized_proxy_peer_id: Optional[str] = None,
+) -> float:
+    """Estimate the hop latency between two consecutive stages."""
+    if source.node_id == target.node_id:
+        return 0.0
+    if centralized_proxy_peer_id:
+        source_to_proxy = source.get_rtt_to_peer_id(centralized_proxy_peer_id)
+        target_to_proxy = target.get_rtt_to_peer_id(centralized_proxy_peer_id)
+        if source_to_proxy == float("inf") or target_to_proxy == float("inf"):
+            return float("inf")
+        return float(source_to_proxy + target_to_proxy)
+    return float(source.get_rtt_to(target))
+
+
 def estimate_pipeline_latency(
-    pipeline_node_ids: List[str], *, id_to_node: Dict[str, Node]
+    pipeline_node_ids: List[str],
+    *,
+    id_to_node: Dict[str, Node],
+    centralized_proxy_peer_id: Optional[str] = None,
 ) -> float:
     """Estimate end-to-end latency for a node-id pipeline.
 
@@ -75,7 +96,11 @@ def estimate_pipeline_latency(
             return float("inf")
         total += node_lat
         if prev is not None:
-            hop = 0.0 if prev.node_id == n.node_id else float(prev.get_rtt_to(n))
+            hop = transition_latency_ms(
+                prev,
+                n,
+                centralized_proxy_peer_id=centralized_proxy_peer_id,
+            )
             if hop == float("inf"):
                 return float("inf")
             total += hop
@@ -180,9 +205,16 @@ def find_turning_points(nodes: List[Node], num_layers: int) -> List[Tuple[str, i
 class RequestRoutingStrategy(ABC):
     """Interface for request routing strategies."""
 
-    def __init__(self, node_manager: NodeManager, total_layers: int = 0) -> None:
+    def __init__(
+        self,
+        node_manager: NodeManager,
+        total_layers: int = 0,
+        *,
+        centralized_proxy_peer_id: Optional[str] = None,
+    ) -> None:
         self.node_manager: NodeManager = node_manager
         self.total_layers: int = total_layers
+        self.centralized_proxy_peer_id: Optional[str] = centralized_proxy_peer_id
 
     @abstractmethod
     def find_optimal_path(
@@ -359,7 +391,11 @@ class DynamicProgrammingRouting(RequestRoutingStrategy):
                 if dp[j] == float("inf"):
                     continue
                 n_j = nodes[j]
-                trans = 0.0 if n_j.node_id == n_i.node_id else float(n_j.get_rtt_to(n_i))
+                trans = transition_latency_ms(
+                    n_j,
+                    n_i,
+                    centralized_proxy_peer_id=self.centralized_proxy_peer_id,
+                )
                 cand = dp[j] + trans + float(n_i.layer_latency_ms)
                 if cand < dp[i]:
                     dp[i] = cand
@@ -542,7 +578,11 @@ class RandomizedOverDynamicPipelinesRouting(RequestRoutingStrategy):
         id_to_node: Dict[str, Node] = {n.node_id: n for n in nodes}
         viable: List[Tuple[List[str], float]] = []
         for p in self._pipelines:
-            lat = estimate_pipeline_latency(p, id_to_node=id_to_node)
+            lat = estimate_pipeline_latency(
+                p,
+                id_to_node=id_to_node,
+                centralized_proxy_peer_id=self.centralized_proxy_peer_id,
+            )
             if lat != float("inf"):
                 viable.append((p, lat))
 
@@ -581,8 +621,14 @@ class RoundRobinOverFixedPipelinesRouting(RequestRoutingStrategy):
         node_manager: NodeManager,
         total_layers: int,
         layer_allocator: Optional[BaseLayerAllocator] = None,
+        *,
+        centralized_proxy_peer_id: Optional[str] = None,
     ) -> None:
-        super().__init__(node_manager=node_manager, total_layers=total_layers)
+        super().__init__(
+            node_manager=node_manager,
+            total_layers=total_layers,
+            centralized_proxy_peer_id=centralized_proxy_peer_id,
+        )
         self._rr_cursor: int = 0
         self.layer_allocator = layer_allocator
 
@@ -608,7 +654,11 @@ class RoundRobinOverFixedPipelinesRouting(RequestRoutingStrategy):
             if len(set(p)) != len(p):
                 continue
             head = p[0]
-            cost = estimate_pipeline_latency(p, id_to_node=id_to_node)
+            cost = estimate_pipeline_latency(
+                p,
+                id_to_node=id_to_node,
+                centralized_proxy_peer_id=self.centralized_proxy_peer_id,
+            )
 
             if cost != float("inf"):
                 by_head.setdefault(head, []).append((p, cost))
@@ -828,7 +878,11 @@ class RoundRobinOverFixedPipelinesRouting(RequestRoutingStrategy):
                 logger.warning(f"Pipeline {candidate} is not ready, skipping")
                 continue
 
-            latency = estimate_pipeline_latency(candidate, id_to_node=id_to_node)
+            latency = estimate_pipeline_latency(
+                candidate,
+                id_to_node=id_to_node,
+                centralized_proxy_peer_id=self.centralized_proxy_peer_id,
+            )
             for nid in candidate:
                 if nid not in id_to_node:
                     raise ValueError(

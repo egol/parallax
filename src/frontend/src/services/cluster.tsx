@@ -78,7 +78,7 @@ export interface NodeInfo {
 
 // Configs
 
-export type NetworkType = 'local' | 'remote';
+export type NetworkType = 'centralized' | 'relay';
 
 export interface ClusterConfig {
   readonly networkType: NetworkType;
@@ -118,7 +118,7 @@ export const ClusterProvider: FC<PropsWithChildren> = ({ children }) => {
 
   // ================================
   // Configs
-  const [networkType, setNetworkType] = useState<NetworkType>('local');
+  const [networkType, setNetworkType] = useState<NetworkType>('centralized');
   const [initNodesNumber, setInitNodesNumber] = useState(1);
   const [modelName, setModelName] = useState<string>('');
 
@@ -280,7 +280,7 @@ export const ClusterProvider: FC<PropsWithChildren> = ({ children }) => {
     const params: Parameters<typeof initScheduler>[0] = {
       model_name: modelName,
       init_nodes_num: initNodesNumber,
-      is_local_network: networkType === 'local',
+      network_mode: networkType,
     };
 
     debugLog('initScheduler', params);

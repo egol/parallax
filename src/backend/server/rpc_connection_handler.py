@@ -1,5 +1,6 @@
 from lattica import ConnectionHandler, Lattica, rpc_method, rpc_stream, rpc_stream_iter
 
+from parallax.p2p.proto import forward_pb2
 from parallax_utils.logging_config import get_logger
 from scheduling.node import Node, NodeHardwareInfo
 from scheduling.scheduler import Scheduler
@@ -29,6 +30,75 @@ class RPCConnectionHandler(ConnectionHandler):
         self.scheduler = scheduler
         self.http_port = http_port
         self.scheduler_manage = scheduler_manage
+
+    @staticmethod
+    def _rotate_routing_table_for_self(routing_table, self_peer_id):
+        if not routing_table:
+            return list(routing_table)
+        entries = list(routing_table)
+        try:
+            self_index = entries.index(self_peer_id)
+        except ValueError as exc:
+            raise RuntimeError("Can not find self in the routing table") from exc
+        return entries[self_index:] + entries[:self_index]
+
+    def _group_requests_by_next_peer(self, requests):
+        grouped_requests = {}
+        self_peer_id = self.lattica.peer_id()
+        for req in requests:
+            rotated = self._rotate_routing_table_for_self(req.routing_table, self_peer_id)
+            req.routing_table[:] = rotated
+            next_peer_id = rotated[(1 % len(rotated))]
+            if next_peer_id == self_peer_id:
+                logger.warning("Proxy routing table for %s loops back to self, skipping", req.rid)
+                continue
+            grouped_requests.setdefault(next_peer_id, []).append(req)
+        return grouped_requests
+
+    @rpc_stream
+    def rpc_pp_forward(
+        self,
+        request: forward_pb2.ForwardRequest,
+    ) -> forward_pb2.ForwardResponse:
+        """Scheduler-host proxy hop for centralized worker routing."""
+        try:
+            grouped_requests = self._group_requests_by_next_peer(request.reqs)
+            for next_peer_id, requests in grouped_requests.items():
+                stub = self.get_stub(next_peer_id)
+                new_forward_request = forward_pb2.ForwardRequest()
+                new_forward_request.forward_mode = request.forward_mode
+                new_forward_request.reqs.extend(requests)
+                response = stub.rpc_pp_forward(new_forward_request)
+                if hasattr(response, "result"):
+                    response.result()
+        except Exception as e:
+            logger.exception(f"Error in rpc_pp_forward: {e}")
+        return forward_pb2.ForwardResponse()
+
+    @rpc_method
+    def rpc_abort(
+        self,
+        request: forward_pb2.AbortRequest,
+    ) -> forward_pb2.AbortResponse:
+        try:
+            grouped_requests = {}
+            self_peer_id = self.lattica.peer_id()
+            for req in request.reqs:
+                for peer_id in req.routing_table:
+                    if peer_id == self_peer_id:
+                        continue
+                    grouped_requests.setdefault(peer_id, []).append(req)
+
+            for peer_id, requests in grouped_requests.items():
+                stub = self.get_stub(peer_id)
+                new_abort_request = forward_pb2.AbortRequest()
+                new_abort_request.reqs.extend(requests)
+                response = stub.rpc_abort(new_abort_request)
+                if hasattr(response, "result"):
+                    response.result()
+        except Exception as e:
+            logger.exception(f"Error in rpc_abort: {e}")
+        return forward_pb2.AbortResponse()
 
     @rpc_stream
     def node_join(self, message):

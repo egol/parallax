@@ -87,7 +87,7 @@ class SchedulerManage:
         self.node_id = f"{dht_prefix}_announce"
         self.lattica = None
         self.stubs = {}
-        self.is_local_network = False
+        self.network_mode = "centralized"
         self.network_signature = None
         self.discovered_nodes: Dict[str, Dict[str, Any]] = {}
         # A worker's initial node_join blocks until allocation is assigned, and the
@@ -105,7 +105,7 @@ class SchedulerManage:
         self.scheduler_ready_event = threading.Event()
         self.publish_cluster_status(reason="startup", force=True)
 
-    def run(self, model_name, init_nodes_num, is_local_network=True):
+    def run(self, model_name, init_nodes_num, network_mode="centralized"):
         """
         Start the scheduler and the P2P service for RPC handling.
         If Lattica is already running, it will be reused.
@@ -114,17 +114,17 @@ class SchedulerManage:
         logger.debug(
             f"SchedulerManage starting: model_name={model_name}, init_nodes_num={init_nodes_num}"
         )
-        self.bootstrap_network(is_local_network)
+        self.bootstrap_network(network_mode)
         self._start_scheduler(model_name, init_nodes_num)
         self.publish_cluster_status(reason="scheduler_run")
 
-    def bootstrap_network(self, is_local_network=True):
+    def bootstrap_network(self, network_mode="centralized"):
         """
         Start only the scheduler's P2P network so workers/chat can discover the
         scheduler peer before a model is initialized.
         """
-        self.is_local_network = is_local_network
-        initial_peers, relay_servers = self._resolve_network_config(is_local_network)
+        self.network_mode = "relay" if network_mode == "relay" else "centralized"
+        initial_peers, relay_servers = self._resolve_network_config(self.network_mode)
         self._start_lattica(initial_peers, relay_servers)
         self.publish_cluster_status(reason="network_bootstrap")
 
@@ -167,10 +167,10 @@ class SchedulerManage:
         return self.init_nodes_num
 
     def get_is_local_network(self):
-        return self.is_local_network
+        return self.network_mode != "relay"
 
     def get_network_mode(self):
-        return "local" if self.is_local_network else "relay"
+        return self.network_mode
 
     def get_peer_id(self):
         if self.lattica is None:
@@ -743,9 +743,48 @@ class SchedulerManage:
                 return None
         return None
 
+    def _cached_rtt_to_peer_id_ms(self, node, peer_id: str) -> Optional[float]:
+        if node.node_id == peer_id:
+            return 0.0
+        node_rtts = node.rtt_to_nodes if isinstance(node.rtt_to_nodes, dict) else {}
+        if peer_id not in node_rtts:
+            return None
+        try:
+            return float(node_rtts[peer_id])
+        except (TypeError, ValueError):
+            return None
+
     def _routing_blocker_for_nodes(
         self, source, target, *, pipeline_id: Optional[int] = None
     ) -> Optional[Dict[str, Any]]:
+        if self.get_network_mode() == "centralized":
+            scheduler_peer_id = self.get_peer_id() or ""
+            if scheduler_peer_id:
+                source_to_host = self._cached_rtt_to_peer_id_ms(source, scheduler_peer_id)
+                target_to_host = self._cached_rtt_to_peer_id_ms(target, scheduler_peer_id)
+                if source_to_host is not None and target_to_host is not None:
+                    return None
+
+                source_name, _, _ = self._node_identity_metadata(source.node_id)
+                target_name, _, _ = self._node_identity_metadata(target.node_id)
+                source_label = source_name or source.node_id
+                target_label = target_name or target.node_id
+                return {
+                    "pipeline_id": pipeline_id,
+                    "source_node_id": source.node_id,
+                    "target_node_id": target.node_id,
+                    "source_start_layer": source.start_layer,
+                    "source_end_layer": source.end_layer,
+                    "target_start_layer": target.start_layer,
+                    "target_end_layer": target.end_layer,
+                    "reason": "missing-rtt",
+                    "detail": (
+                        f"Centralized mode requires both {source_label} and {target_label} to reach the "
+                        f"scheduler host {scheduler_peer_id}, but host RTT metadata is still missing for "
+                        "this serving hop."
+                    ),
+                }
+
         if self._cached_rtt_ms(source, target) is not None:
             return None
 
@@ -913,7 +952,7 @@ class SchedulerManage:
                 "scheduler_peer_id": self.get_peer_id(),
                 "network_mode": self.get_network_mode(),
                 "node_join_command": get_node_join_command(
-                    self.get_peer_id(), self.is_local_network
+                    self.get_peer_id(), self.get_network_mode()
                 ),
                 "node_list": [],
                 "need_more_nodes": False,
@@ -963,7 +1002,7 @@ class SchedulerManage:
                 "scheduler_peer_id": self.get_peer_id(),
                 "network_mode": self.get_network_mode(),
                 "node_join_command": get_node_join_command(
-                    self.get_peer_id(), self.is_local_network
+                    self.get_peer_id(), self.get_network_mode()
                 ),
                 "node_list": self.get_node_list(),
                 "need_more_nodes": self.need_more_nodes(),
@@ -1003,6 +1042,9 @@ class SchedulerManage:
             heartbeat_timeout=heartbeat_timeout,
             inactive_heartbeat_timeout=inactive_heartbeat_timeout,
             state_change_callback=self.on_scheduler_state_change,
+            centralized_proxy_peer_id=(
+                self.get_peer_id() if self.get_network_mode() == "centralized" else None
+            ),
         )
         logger.info(
             "Scheduler heartbeat timeouts configured: ready=%.1fs inactive=%.1fs",
@@ -1025,10 +1067,10 @@ class SchedulerManage:
         logger.info("Nodes will automatically rejoin via heartbeat (node_update) mechanism")
         self.publish_cluster_status(reason="scheduler_started")
 
-    def _resolve_network_config(self, is_local_network: bool):
+    def _resolve_network_config(self, network_mode: str):
         initial_peers = list(self.configured_initial_peers)
         relay_servers = list(self.configured_relay_servers)
-        if not is_local_network and not initial_peers and not relay_servers:
+        if network_mode == "relay" and not initial_peers and not relay_servers:
             logger.debug("Using public relay servers")
             initial_peers = list(PUBLIC_INITIAL_PEERS)
             relay_servers = list(PUBLIC_RELAY_SERVERS)
@@ -1038,7 +1080,7 @@ class SchedulerManage:
         self, initial_peers: List[str], relay_servers: List[str]
     ) -> tuple:
         return (
-            self.is_local_network,
+            self.network_mode,
             tuple(initial_peers),
             tuple(relay_servers),
             tuple(self.host_maddrs),
@@ -1184,7 +1226,24 @@ class SchedulerManage:
             logger.debug(
                 f"Routing table resolved for request_id={request_id}: {request.routing_table}"
             )
-        return request.routing_table
+        return self._expand_routing_table(request.routing_table)
+
+    def _expand_routing_table(self, routing_table: Optional[List[str]]) -> Optional[List[str]]:
+        if routing_table is None:
+            return None
+        if (
+            self.get_network_mode() != "centralized"
+            or len(routing_table) <= 1
+            or not self.get_peer_id()
+        ):
+            return routing_table
+
+        scheduler_peer_id = self.get_peer_id()
+        expanded: List[str] = []
+        for node_id in routing_table:
+            expanded.append(node_id)
+            expanded.append(scheduler_peer_id)
+        return expanded
 
     def get_schedule_status(self):
         """

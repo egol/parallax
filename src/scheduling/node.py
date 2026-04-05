@@ -409,6 +409,17 @@ class Node:
             return float("inf")
         return self.rtt_to_nodes[other.node_id]
 
+    def get_rtt_to_peer_id(self, peer_id: str) -> float:
+        """Get RTT to an arbitrary peer id from cached RTTs."""
+        if self.node_id == peer_id:
+            return 0.0
+        if self.rtt_to_nodes is None:
+            return float("inf")
+        if peer_id not in self.rtt_to_nodes:
+            logger.warning("Cannot find RTT from node %s to peer %s", self.node_id, peer_id)
+            return float("inf")
+        return self.rtt_to_nodes[peer_id]
+
     def hosts_layer(self, layer_id: int) -> bool:
         """Return True if this node hosts the given layer id.
 

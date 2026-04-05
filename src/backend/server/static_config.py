@@ -263,9 +263,9 @@ def estimate_vram_gb_required(model_info):
     )
 
 
-def get_node_join_command(scheduler_addr, is_local_network):
+def get_node_join_command(scheduler_addr, network_mode):
     if scheduler_addr:
-        if is_local_network:
+        if network_mode != "relay":
             return {
                 "command": NODE_JOIN_COMMAND_LOCAL_NETWORK.format(scheduler_addr=scheduler_addr),
             }

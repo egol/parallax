@@ -14,9 +14,9 @@ class _SchedulerManageStub:
     def is_running(self):
         return False
 
-    def run(self, model_name, init_nodes_num, is_local_network):
-        self.run_calls.append((model_name, init_nodes_num, is_local_network))
-        self.run_impl(model_name, init_nodes_num, is_local_network)
+    def run(self, model_name, init_nodes_num, network_mode):
+        self.run_calls.append((model_name, init_nodes_num, network_mode))
+        self.run_impl(model_name, init_nodes_num, network_mode)
 
     def get_cluster_status(self):
         return {
@@ -38,9 +38,25 @@ def test_scheduler_init_triggers_snapshot_download_progress(monkeypatch, tmp_pat
     metadata_dir = tmp_path / "metadata"
     metadata_dir.mkdir()
     downloaded_marker = tmp_path / "downloaded.marker"
+    metadata_calls = []
     snapshot_calls = []
+    weight_download_calls = []
 
-    def fake_download_metadata_only(repo_id, cache_dir=None, force_download=False, local_files_only=False):
+    def fake_download_metadata_only(
+        repo_id,
+        cache_dir=None,
+        force_download=False,
+        local_files_only=False,
+        **_kwargs,
+    ):
+        metadata_calls.append(
+            {
+                "repo_id": repo_id,
+                "cache_dir": cache_dir,
+                "force_download": force_download,
+                "local_files_only": local_files_only,
+            }
+        )
         return metadata_dir
 
     def fake_determine_needed_weight_files_for_download(model_path, start_layer, end_layer):
@@ -58,7 +74,34 @@ def test_scheduler_init_triggers_snapshot_download_progress(monkeypatch, tmp_pat
         downloaded_marker.write_text("downloaded", encoding="utf-8")
         return str(metadata_dir)
 
-    def run_impl(model_name, init_nodes_num, is_local_network):
+    def fake_list_remote_weight_files(_repo_id):
+        return ["model.safetensors"]
+
+    def fake_download_weight_files(
+        repo_id,
+        weight_files,
+        model_path=None,
+        cache_dir=None,
+        force_download=False,
+        local_files_only=False,
+        shared_state=None,
+        is_remote=True,
+    ):
+        weight_download_calls.append(
+            {
+                "repo_id": repo_id,
+                "weight_files": list(weight_files),
+                "model_path": model_path,
+                "cache_dir": cache_dir,
+                "force_download": force_download,
+                "local_files_only": local_files_only,
+                "shared_state": shared_state,
+                "is_remote": is_remote,
+            }
+        )
+        downloaded_marker.write_text("downloaded", encoding="utf-8")
+
+    def run_impl(model_name, init_nodes_num, network_mode):
         selective_download.selective_model_download(
             repo_id=model_name,
             start_layer=0,
@@ -68,7 +111,7 @@ def test_scheduler_init_triggers_snapshot_download_progress(monkeypatch, tmp_pat
         )
 
     async def fake_validate_scheduler_init_request(_request_data):
-        return "Qwen/Qwen3-0.6B-FP8", 1, True
+        return "Qwen/Qwen3-0.6B-FP8", 1, "centralized"
 
     scheduler_manage = _SchedulerManageStub(run_impl)
     monkeypatch.setattr(
@@ -80,6 +123,16 @@ def test_scheduler_init_triggers_snapshot_download_progress(monkeypatch, tmp_pat
         selective_download,
         "determine_needed_weight_files_for_download",
         fake_determine_needed_weight_files_for_download,
+    )
+    monkeypatch.setattr(
+        selective_download,
+        "_list_remote_weight_files",
+        fake_list_remote_weight_files,
+    )
+    monkeypatch.setattr(
+        selective_download,
+        "_download_weight_files",
+        fake_download_weight_files,
     )
     monkeypatch.setattr(selective_download, "snapshot_download", fake_snapshot_download)
     monkeypatch.setattr(backend_main, "scheduler_manage", scheduler_manage)
@@ -96,14 +149,17 @@ def test_scheduler_init_triggers_snapshot_download_progress(monkeypatch, tmp_pat
             json={
                 "model_name": "Qwen/Qwen3-0.6B-FP8",
                 "init_nodes_num": 1,
-                "is_local_network": True,
+                "network_mode": "centralized",
             },
         )
 
     assert response.status_code == 200, response.text
-    assert scheduler_manage.run_calls == [("Qwen/Qwen3-0.6B-FP8", 1, True)]
+    assert scheduler_manage.run_calls == [("Qwen/Qwen3-0.6B-FP8", 1, "centralized")]
     assert downloaded_marker.exists(), "scheduler init should trigger a snapshot download"
-    assert len(snapshot_calls) == 1
+    assert len(metadata_calls) == 1
+    assert len(snapshot_calls) == 0
+    assert len(weight_download_calls) == 1
+    assert weight_download_calls[0]["weight_files"] == ["model.safetensors"]
 
     log_messages = [record.getMessage() for record in caplog.records]
     assert any(

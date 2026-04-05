@@ -100,7 +100,7 @@ export default function PageSetup() {
 
         <Stack direction='row' justifyContent='space-between' alignItems='center' gap={2}>
           <Typography color='text.secondary'>
-            Are your nodes within the same local network?
+            How should nodes route inference traffic?
           </Typography>
           <ToggleButtonGroup
             sx={{ width: '10rem', textTransform: 'none' }}
@@ -108,11 +108,11 @@ export default function PageSetup() {
             value={networkType}
             onChange={(_, value) => value && setNetworkType(value)}
           >
-            <ToggleButton value='local' sx={{ textTransform: 'none' }}>
-              Local
+            <ToggleButton value='centralized' sx={{ textTransform: 'none' }}>
+              Centralized
             </ToggleButton>
-            <ToggleButton value='remote' sx={{ textTransform: 'none' }}>
-              Remote
+            <ToggleButton value='relay' sx={{ textTransform: 'none' }}>
+              Relay
             </ToggleButton>
           </ToggleButtonGroup>
         </Stack>

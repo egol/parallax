@@ -14,7 +14,7 @@ export const getModelList = async (): Promise<readonly any[]> => {
 export const initScheduler = async (params: {
   model_name: string;
   init_nodes_num: number;
-  is_local_network: boolean;
+  network_mode: 'centralized' | 'relay';
 }): Promise<void> => {
   const response = await fetch(`${API_BASE_URL}/scheduler/init`, {
     method: 'POST',

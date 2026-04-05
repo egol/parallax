@@ -819,16 +819,23 @@ class GradientServer:
     def start_node_sender(self):
         send_to_peer = get_zmq_socket(zmq.Context(2), zmq.PULL, self.send_to_peer_addr, True)
 
+        def rotate_routing_table_for_self(routing_table):
+            if not routing_table:
+                return list(routing_table)
+            entries = list(routing_table)
+            try:
+                self_index = entries.index(self.lattica.peer_id())
+            except ValueError as exc:
+                raise RuntimeError("Can not find self in the routing table") from exc
+            return entries[self_index:] + entries[:self_index]
+
         def group_requests_by_next_peer(requests: List[forward_pb2.Req]):
             grouped_requests = {}
             for req in requests:
                 assert len(req.routing_table) > 0, "Request routing table is not set"
-                try:
-                    self_index = list(req.routing_table).index(self.lattica.peer_id())
-                except ValueError as exc:
-                    raise RuntimeError("Can not find self in the routing table") from exc
-
-                next_peer_id = req.routing_table[(self_index + 1) % len(req.routing_table)]
+                rotated = rotate_routing_table_for_self(req.routing_table)
+                req.routing_table[:] = rotated
+                next_peer_id = rotated[(1 % len(rotated))]
                 if next_peer_id not in grouped_requests:
                     grouped_requests[next_peer_id] = []
                 grouped_requests[next_peer_id].append(req)
