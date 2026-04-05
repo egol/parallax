@@ -472,6 +472,45 @@ class GradientServer:
                 model_name=self.model_name,
             )
 
+    def _announce_current_range(self):
+        if self.lattica is None:
+            return
+        if self.block_start_index is None or self.block_end_index is None:
+            return
+        self.lattica.store(
+            key=self.prefix_id,
+            subkey=self.lattica.peer_id(),
+            value={
+                "block_start_index": self.block_start_index,
+                "block_end_index": self.block_end_index,
+            },
+            expiration_time=time.time() + 60,
+        )
+
+    def _discover_candidate_peer_ids(self) -> List[str]:
+        candidate_peer_ids = []
+        seen = set()
+
+        def add(peer_id):
+            if not peer_id or peer_id == self.lattica.peer_id() or peer_id in seen:
+                return
+            seen.add(peer_id)
+            candidate_peer_ids.append(peer_id)
+
+        for peer_id in self.lattica.get_all_peers():
+            add(peer_id)
+
+        try:
+            block_servers = self.lattica.get(self.prefix_id)
+            if block_servers is not None:
+                for peer_id in block_servers.value.keys():
+                    add(peer_id)
+        except Exception as e:
+            logger.debug(f"Failed to discover announced peers from {self.prefix_id}: {e}")
+
+        add(self.scheduler_peer_id)
+        return candidate_peer_ids
+
     def check_and_release_disk_weight(self):
         """Only save 3 history versions of weight"""
         while len(self.refit_timestamp_history) > 3:
@@ -1032,15 +1071,8 @@ class GradientServer:
                                         f"Received weight refit request but enable_weight_refit is set to {self.enable_weight_refit}."
                                     )
                         else:
-                            self.lattica.store(
-                                key=self.prefix_id,
-                                subkey=self.lattica.peer_id(),
-                                value={
-                                    "block_start_index": self.block_start_index,
-                                    "block_end_index": self.block_end_index,
-                                },
-                                expiration_time=time.time() + 60,  # Valid for 60 seconds
-                            )
+                            self._announce_current_range()
+                        self._announce_current_range()
                     except Exception as e:
                         logger.warning(
                             f"Failed to announce {self.prefix_id}_{self.lattica.peer_id()}: {e}",
@@ -1074,7 +1106,7 @@ class GradientServer:
             self.rtts = {}
             all_peers = []
             for _ in range(1 if is_update else 10):
-                all_peers = self.lattica.get_all_peers()
+                all_peers = self._discover_candidate_peer_ids()
                 if len(all_peers) > 0 and self.scheduler_peer_id in all_peers:
                     break
                 logger.warning(
