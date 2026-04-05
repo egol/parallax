@@ -40,6 +40,7 @@ _DEFAULT_NODE_ANNOUNCE_INTERVAL_SEC = float(
 _ACTIVE_INIT_NODE_ANNOUNCE_INTERVAL_SEC = float(
     os.environ.get("PARALLAX_NODE_INIT_ANNOUNCE_INTERVAL_SEC", "1.0")
 )
+_JOIN_RETRY_FOREVER_ENV = "PARALLAX_JOIN_RETRY_FOREVER"
 
 
 def resolve_lattica_key_path(default: Optional[str] = None) -> Optional[str]:
@@ -442,6 +443,17 @@ class GradientServer:
                 return _ACTIVE_INIT_NODE_ANNOUNCE_INTERVAL_SEC
         return _DEFAULT_NODE_ANNOUNCE_INTERVAL_SEC
 
+    def _join_retry_forever(self) -> bool:
+        override = os.getenv(_JOIN_RETRY_FOREVER_ENV, "").strip().lower()
+        if override in {"1", "true", "yes", "on"}:
+            return True
+        if override in {"0", "false", "no", "off"}:
+            return False
+        return self.role == "host"
+
+    def _join_attempt_is_fatal(self, attempt: int) -> bool:
+        return not self._join_retry_forever() and attempt >= self._max_join_attempts
+
     def _sync_to_shared_state(self):
         """Sync current layer allocation and status to shared state if available"""
         if hasattr(self, "_shared_state") and self._shared_state is not None:
@@ -598,7 +610,9 @@ class GradientServer:
 
         if self.scheduler_addr is not None:  # central scheduler mode
             last_error = None
-            for attempt in range(1, self._max_join_attempts + 1):
+            attempt = 0
+            while True:
+                attempt += 1
                 try:
                     self.scheduler_stub = RPCConnectionHandler(
                         self.lattica,
@@ -659,9 +673,31 @@ class GradientServer:
                     logger.exception(
                         f"Error in join scheduler (attempt {attempt}/{self._max_join_attempts}): {e}"
                     )
+                    if self._shared_state is not None:
+                        self._shared_state.update_runtime_state(
+                            status=ServerState.JOINING.value,
+                            model_name=None,
+                            init_stage="allocating",
+                            init_detail="Waiting for scheduler reachability and layer allocation.",
+                            downloaded_files=None,
+                            total_files=None,
+                            cached_files=None,
+                            ready_bytes=None,
+                            total_bytes=None,
+                            cached_bytes=None,
+                            current_file="",
+                            current_file_bytes=None,
+                            current_file_total_bytes=None,
+                            failure_reason=str(e),
+                        )
                     self._close_lattica()
-                    if attempt == self._max_join_attempts:
+                    if self._join_attempt_is_fatal(attempt):
                         raise RuntimeError("Failed to join scheduler after retries") from e
+                    if self._join_retry_forever() and attempt == self._max_join_attempts:
+                        logger.warning(
+                            "Join scheduler is still unavailable after the normal retry budget; "
+                            "continuing to retry because this worker is configured to wait indefinitely."
+                        )
                     time.sleep(self._node_announce_interval_seconds())
                     self._build_lattica_with_retry()
             if last_error is not None and self.scheduler_stub is None:
