@@ -95,3 +95,41 @@ def test_join_retry_override_can_force_participant_to_wait(monkeypatch):
 
     assert server._join_retry_forever() is True
     assert server._join_attempt_is_fatal(server._max_join_attempts) is False
+
+
+class FakeConnectionHandler:
+    def __init__(self):
+        self.calls = []
+
+    def get_stub(self, peer_id):
+        self.calls.append(peer_id)
+        return {"peer_id": peer_id}
+
+
+def test_scheduler_peer_uses_scheduler_rpc_stub(monkeypatch):
+    monkeypatch.setenv("PARALLAX_ROLE", "compute-node")
+    server = build_server()
+    server.scheduler_peer_id = "scheduler-peer"
+    server.scheduler_stub = object()
+    server.connection_handler = FakeConnectionHandler()
+
+    assert server.get_stub("scheduler-peer") is server.scheduler_stub
+    assert server.connection_handler.calls == []
+
+
+class FakeRttLattica(FakeLattica):
+    def get_peer_rtt(self, peer_id):
+        return None
+
+
+def test_get_node_info_handles_missing_rtt_without_type_error(monkeypatch):
+    monkeypatch.setenv("PARALLAX_ROLE", "compute-node")
+    monkeypatch.setattr("parallax.p2p.server.detect_node_hardware", lambda peer_id: {})
+    monkeypatch.setattr("parallax.p2p.server.time.sleep", lambda *_args, **_kwargs: None)
+    server = build_server()
+    server.lattica = FakeRttLattica()
+    server.scheduler_peer_id = "scheduler-peer"
+
+    info = server.get_node_info(is_update=True)
+
+    assert info["rtt_to_nodes"]["scheduler-peer"] == 100

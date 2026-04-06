@@ -807,6 +807,12 @@ class GradientServer:
         return server_blocks
 
     def get_stub(self, peer_id):
+        if (
+            self.scheduler_peer_id is not None
+            and peer_id == self.scheduler_peer_id
+            and self.scheduler_stub is not None
+        ):
+            return self.scheduler_stub
         if peer_id not in self.stubs:
             self.stubs[peer_id] = self.connection_handler.get_stub(peer_id)
         return self.stubs[peer_id]
@@ -1180,7 +1186,9 @@ class GradientServer:
                 rtt = None
                 for _ in range(1 if is_update else 30):
                     try:
-                        rtt = self.lattica.get_peer_rtt(peer_id) * 1000
+                        raw_rtt = self.lattica.get_peer_rtt(peer_id)
+                        if raw_rtt is not None:
+                            rtt = raw_rtt * 1000
                     except Exception as e:
                         logger.warning(f"Failed to get rtt to {peer_id}: {e}")
                     if rtt is not None:

@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass, field
 from math import floor
 from typing import Dict, List, Optional
+import os
 
 from parallax_utils.logging_config import get_logger
 from parallax_utils.utils import bytes_per_element, compute_max_batch_size
@@ -20,7 +21,22 @@ from scheduling.model_info import ModelInfo
 
 logger = get_logger(__name__)
 
-MLX_MEMORY_RESERVE_GB = 6.0
+DEFAULT_MLX_MEMORY_RESERVE_GB = 1.0
+
+
+def get_mlx_memory_reserve_gb() -> float:
+    raw = os.getenv("PARALLAX_MLX_MEMORY_RESERVE_GB", "").strip()
+    if not raw:
+        return DEFAULT_MLX_MEMORY_RESERVE_GB
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        logger.warning(
+            "Ignoring invalid PARALLAX_MLX_MEMORY_RESERVE_GB=%r; using default %.1f",
+            raw,
+            DEFAULT_MLX_MEMORY_RESERVE_GB,
+        )
+        return DEFAULT_MLX_MEMORY_RESERVE_GB
 
 
 @dataclass
@@ -213,7 +229,7 @@ class Node:
         """Return per-device allocatable memory after device-specific safety reserve."""
         total_memory_gb = max(float(self.hardware.memory_gb), 0.0)
         if self.hardware.device == "mlx":
-            return max(0.0, total_memory_gb - MLX_MEMORY_RESERVE_GB)
+            return max(0.0, total_memory_gb - get_mlx_memory_reserve_gb())
         return total_memory_gb
 
     @property

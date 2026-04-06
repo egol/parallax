@@ -19,7 +19,7 @@ from scheduling.layer_allocation import (
     GreedyLayerAllocator,
 )
 from scheduling.model_info import ModelInfo
-from scheduling.node import MLX_MEMORY_RESERVE_GB, Node, NodeHardwareInfo
+from scheduling.node import DEFAULT_MLX_MEMORY_RESERVE_GB, Node, NodeHardwareInfo
 from scheduling.node_management import NodeState
 
 from .test_utils import build_model_info, build_node_management
@@ -65,9 +65,9 @@ def test_mlx_capacity_reserves_unified_memory_headroom():
     )
     node.set_layer_allocation(0, 1)
 
-    assert node.effective_memory_gb == pytest.approx(24.0 - MLX_MEMORY_RESERVE_GB)
+    assert node.effective_memory_gb == pytest.approx(24.0 - DEFAULT_MLX_MEMORY_RESERVE_GB)
     assert node.per_decoder_layer_kv_cache_memory == pytest.approx(
-        (24.0 - MLX_MEMORY_RESERVE_GB) * 1024 * 1024 * 1024
+        (24.0 - DEFAULT_MLX_MEMORY_RESERVE_GB) * 1024 * 1024 * 1024
     )
 
     cuda_peer = Node(
