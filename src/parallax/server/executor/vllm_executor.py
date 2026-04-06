@@ -32,6 +32,25 @@ from parallax_utils.logging_config import get_logger
 logger = get_logger(__name__)
 
 
+def _extract_vllm_hidden_states(execute_model_state: Any):
+    if execute_model_state is None:
+        raise RuntimeError("vLLM execute_model returned no execution state for hidden-state forwarding.")
+    if hasattr(execute_model_state, "hidden_states"):
+        return execute_model_state.hidden_states
+    if isinstance(execute_model_state, dict):
+        hidden_states = execute_model_state.get("hidden_states")
+        if hidden_states is not None:
+            return hidden_states
+    tensors = getattr(execute_model_state, "tensors", None)
+    if isinstance(tensors, dict):
+        hidden_states = tensors.get("hidden_states")
+        if hidden_states is not None:
+            return hidden_states
+    raise RuntimeError(
+        "vLLM execute_model state does not expose hidden_states for intermediate forwarding."
+    )
+
+
 class VLLMExecutor(BaseExecutor):
     def __init__(
         self,
@@ -373,7 +392,7 @@ class VLLMExecutor(BaseExecutor):
             return {"hidden_states": sampled_token_ids_cpu, "probs": token_probs}
         else:
             # Intermediate peer: return hidden states for next peer
-            return {"hidden_states": execute_model_state.hidden_states, "probs": None}
+            return {"hidden_states": _extract_vllm_hidden_states(execute_model_state), "probs": None}
 
     def _release_request(self, rid: str):
         """Release per-request resources in vLLM."""

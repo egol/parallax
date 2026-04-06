@@ -218,6 +218,57 @@ def test_vllm_executor_non_last_peer_returns_hidden_states():
     assert output == {"hidden_states": "forwarded-hidden-states", "probs": None}
 
 
+def test_vllm_executor_non_last_peer_accepts_intermediate_tensors_mapping():
+    executor = VLLMExecutor.__new__(VLLMExecutor)
+    executor.model_runner = types.SimpleNamespace(
+        execute_model=lambda **kwargs: (
+            {"hidden_states": "forwarded-from-mapping", "residual": "ignored"},
+            None,
+            None,
+            None,
+            None,
+        )
+    )
+
+    output = executor.process_batch(
+        {
+            "scheduler_output": "scheduler-output",
+            "pp_proxy_tensors": "proxy",
+            "requests": [],
+        },
+        return_decoded_tokens=False,
+    )
+
+    assert output == {"hidden_states": "forwarded-from-mapping", "probs": None}
+
+
+def test_vllm_executor_non_last_peer_raises_when_hidden_states_missing():
+    executor = VLLMExecutor.__new__(VLLMExecutor)
+    executor.model_runner = types.SimpleNamespace(
+        execute_model=lambda **kwargs: (
+            {"residual": "missing-hidden"},
+            None,
+            None,
+            None,
+            None,
+        )
+    )
+
+    try:
+        executor.process_batch(
+            {
+                "scheduler_output": "scheduler-output",
+                "pp_proxy_tensors": "proxy",
+                "requests": [],
+            },
+            return_decoded_tokens=False,
+        )
+    except RuntimeError as exc:
+        assert "does not expose hidden_states" in str(exc)
+    else:
+        raise AssertionError("Expected process_batch to fail when hidden_states are missing")
+
+
 def test_vllm_executor_last_peer_returns_sampled_tokens():
     executor = VLLMExecutor.__new__(VLLMExecutor)
     executor.model_runner = types.SimpleNamespace(
