@@ -343,7 +343,16 @@ class ParallaxVLLMModelRunner(GPUModelRunner):
             )
             logger.debug("Successfully initialized intermediate_tensors buffer")
 
-        super().execute_model(scheduler_output, intermediate_tensors)
+        execute_model_state = super().execute_model(scheduler_output, intermediate_tensors)
+        if execute_model_state is not None:
+            self.execute_model_state = execute_model_state
+        else:
+            execute_model_state = getattr(self, "execute_model_state", None)
+        if execute_model_state is None:
+            raise RuntimeError(
+                "vLLM execute_model returned no execution state and did not populate "
+                "self.execute_model_state."
+            )
 
         sampled_token_ids = None
         sampled_token_ids_cpu = None
@@ -351,15 +360,15 @@ class ParallaxVLLMModelRunner(GPUModelRunner):
         logits = None
 
         if return_decoded_tokens:
-            if hasattr(self.execute_model_state, "logits"):
-                logits = self.execute_model_state.logits
+            if hasattr(execute_model_state, "logits"):
+                logits = execute_model_state.logits
 
             sampler_output = super().sample_tokens(grammar_output=None)
             sampled_token_ids = sampler_output._sampled_token_ids
             sampled_token_ids_cpu = sampler_output.sampled_token_ids_cpu
 
         return (
-            self.execute_model_state,
+            execute_model_state,
             sampled_token_ids,
             sampled_token_ids_cpu,
             sampler_output,

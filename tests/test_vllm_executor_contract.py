@@ -112,7 +112,8 @@ def test_vllm_model_runner_non_decoding_returns_stable_tuple(monkeypatch):
     runner = ParallaxVLLMModelRunner.__new__(ParallaxVLLMModelRunner)
     runner.is_first_peer = True
     runner.intermediate_tensors = None
-    runner.execute_model_state = types.SimpleNamespace(hidden_states="hs")
+    runner.execute_model_state = None
+    returned_state = types.SimpleNamespace(hidden_states="hs")
 
     execute_calls = []
     sample_calls = []
@@ -122,7 +123,8 @@ def test_vllm_model_runner_non_decoding_returns_stable_tuple(monkeypatch):
         "execute_model",
         lambda self, scheduler_output, intermediate_tensors: execute_calls.append(
             (scheduler_output, intermediate_tensors)
-        ),
+        )
+        or returned_state,
     )
     monkeypatch.setattr(
         model_runner_module.GPUModelRunner,
@@ -136,9 +138,60 @@ def test_vllm_model_runner_non_decoding_returns_stable_tuple(monkeypatch):
         return_decoded_tokens=False,
     )
 
-    assert result == (runner.execute_model_state, None, None, None, None)
+    assert result == (returned_state, None, None, None, None)
+    assert runner.execute_model_state is returned_state
     assert execute_calls == [("scheduler-output", "proxy")]
     assert sample_calls == []
+
+
+def test_vllm_model_runner_non_decoding_supports_legacy_in_place_state(monkeypatch):
+    runner = ParallaxVLLMModelRunner.__new__(ParallaxVLLMModelRunner)
+    runner.is_first_peer = True
+    runner.intermediate_tensors = None
+    runner.execute_model_state = types.SimpleNamespace(hidden_states="legacy-hs")
+
+    monkeypatch.setattr(
+        model_runner_module.GPUModelRunner,
+        "execute_model",
+        lambda self, scheduler_output, intermediate_tensors: None,
+    )
+    monkeypatch.setattr(
+        model_runner_module.GPUModelRunner,
+        "sample_tokens",
+        lambda self, grammar_output=None: None,
+    )
+
+    result = runner.execute_model(
+        scheduler_output="scheduler-output",
+        intermediate_tensors="proxy",
+        return_decoded_tokens=False,
+    )
+
+    assert result == (runner.execute_model_state, None, None, None, None)
+
+
+def test_vllm_model_runner_raises_when_execution_state_is_missing(monkeypatch):
+    runner = ParallaxVLLMModelRunner.__new__(ParallaxVLLMModelRunner)
+    runner.is_first_peer = True
+    runner.intermediate_tensors = None
+    runner.execute_model_state = None
+
+    monkeypatch.setattr(
+        model_runner_module.GPUModelRunner,
+        "execute_model",
+        lambda self, scheduler_output, intermediate_tensors: None,
+    )
+
+    try:
+        runner.execute_model(
+            scheduler_output="scheduler-output",
+            intermediate_tensors="proxy",
+            return_decoded_tokens=False,
+        )
+    except RuntimeError as exc:
+        assert "returned no execution state" in str(exc)
+    else:
+        raise AssertionError("Expected execute_model to fail when vLLM returns no state")
 
 
 def test_vllm_executor_non_last_peer_returns_hidden_states():
