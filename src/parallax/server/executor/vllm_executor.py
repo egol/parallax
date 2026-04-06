@@ -325,6 +325,9 @@ class VLLMExecutor(BaseExecutor):
             )
         )
 
+        # Non-last peers only forward hidden states; decode artifacts can be None.
+        # The model runner keeps a stable tuple shape so this caller does not need
+        # to special-case the non-decoding path.
         # Return appropriate output based on peer position
         if return_decoded_tokens:
             needs_probs = any(

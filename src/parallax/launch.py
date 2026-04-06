@@ -32,6 +32,17 @@ from parallax_utils.version_check import check_latest_release
 logger = get_logger("parallax.launch")
 
 
+def _p2p_startup_failure_reason(shared_state: SharedState) -> str:
+    runtime_state = shared_state.get_runtime_state()
+    failure_reason = (runtime_state.get("failure_reason") or "").strip()
+    if failure_reason:
+        return failure_reason
+    init_detail = (runtime_state.get("init_detail") or "").strip()
+    if init_detail:
+        return init_detail
+    return "P2P server process exited before layer allocation was assigned."
+
+
 def _update_args_from_shared_state(args, shared_state: SharedState, force_update: bool):
     """Update args with layer allocation from shared state"""
     model_info = shared_state.get_model_info()
@@ -316,8 +327,12 @@ if __name__ == "__main__":
                     )
                     has_warned_about_join_timeout = True
                 if p2p_server_process is not None and not p2p_server_process.is_alive():
-                    logger.error("P2P server process exited before layer allocation was assigned.")
-                    raise RuntimeError("P2P server process exited before layer allocation was assigned.")
+                    failure_reason = _p2p_startup_failure_reason(shared_state)
+                    logger.error(
+                        "P2P server process exited before layer allocation was assigned: "
+                        f"{failure_reason}"
+                    )
+                    raise RuntimeError(failure_reason)
                 time.sleep(1)
 
             # Get layer allocation from shared state

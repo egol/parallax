@@ -437,6 +437,14 @@ class GradientServer:
         self._max_join_attempts = 3
         self._scheduler_reachable_once = False
         self._scheduler_update_failure_count = 0
+        self._last_build_error = None
+
+    @staticmethod
+    def _is_addr_in_use_error(error: Exception | str | None) -> bool:
+        if error is None:
+            return False
+        text = str(error).lower()
+        return "address already in use" in text or "addrinuse" in text
 
     def _node_announce_interval_seconds(self) -> float:
         if hasattr(self, "_shared_state") and self._shared_state is not None:
@@ -592,16 +600,20 @@ class GradientServer:
             if self.build_lattica():
                 logger.info("Lattica built successfully")
                 return
-            last_error = RuntimeError("Failed to build Lattica")
+            last_error = self._last_build_error or RuntimeError("Failed to build Lattica")
             if attempt == self._max_build_attempts:
                 break
+            wait_seconds = 3 if self._is_addr_in_use_error(last_error) else 10
             logger.error(
-                f"Failed to build lattica, waiting for 10 seconds before retry {attempt + 1}/{self._max_build_attempts}"
+                "Failed to build lattica"
+                f" ({last_error}), waiting for {wait_seconds} seconds before retry "
+                f"{attempt + 1}/{self._max_build_attempts}"
             )
-            time.sleep(10)
+            time.sleep(wait_seconds)
         raise last_error
 
     def build_lattica(self):
+        self._last_build_error = None
         self.lattica = Lattica.builder().with_listen_addrs(self.host_maddrs)
         key_path = resolve_lattica_key_path()
         if key_path is not None:
@@ -635,7 +647,19 @@ class GradientServer:
             logger.info(f"Using initial peers: {self.initial_peers}")
             self.lattica.with_bootstraps(self.initial_peers)
 
-        self.lattica.build()
+        try:
+            self.lattica.build()
+        except Exception as e:
+            self._last_build_error = e
+            if self._is_addr_in_use_error(e):
+                logger.warning(
+                    "Failed to initialize Lattica because the worker listen address is still in use; "
+                    "the worker will retry."
+                )
+            else:
+                logger.exception(f"Failed to initialize Lattica: {e}")
+            self._close_lattica()
+            return False
 
         if len(self.relay_servers) > 0:
             try:
@@ -1246,13 +1270,18 @@ class GradientServer:
 
         return info
 
-    def shutdown(self):
+    def shutdown(self, preserve_runtime_failure: bool = False):
         self.stop_event.set()
 
-        self.status = ServerState.OFFLINE
-        # Sync final status to shared state
-        self._sync_to_shared_state()
-        if hasattr(self, "_shared_state") and self._shared_state is not None:
+        if not preserve_runtime_failure:
+            self.status = ServerState.OFFLINE
+            # Sync final status to shared state
+            self._sync_to_shared_state()
+        if (
+            not preserve_runtime_failure
+            and hasattr(self, "_shared_state")
+            and self._shared_state is not None
+        ):
             self._shared_state.update_runtime_state(
                 status=self.status.value,
                 model_name=self.model_name,
@@ -1269,16 +1298,22 @@ class GradientServer:
                 current_file_total_bytes=None,
                 failure_reason="",
             )
-        if self.scheduler_addr is not None:
-            logger.info(f"Leave scheduler: {self.lattica.peer_id()}")
-            self.scheduler_stub.node_leave(self.get_node_info(is_update=True))
+        if (
+            self.scheduler_addr is not None
+            and self.lattica is not None
+            and self.scheduler_stub is not None
+        ):
+            try:
+                logger.info(f"Leave scheduler: {self.lattica.peer_id()}")
+                self.scheduler_stub.node_leave(self.get_node_info(is_update=True))
+            except Exception as e:
+                logger.warning(f"Failed to leave scheduler cleanly: {e}")
 
         if self.announcer is not None:
             self.announcer.join()
         if self.routing_table_updater is not None:
             self.routing_table_updater.join()
-        if self.lattica is not None:
-            self.lattica.close()
+        self._close_lattica()
 
 
 def _run_p2p_server_process(
@@ -1311,6 +1346,8 @@ def _run_p2p_server_process(
     # Set log level in subprocess (spawn mode doesn't inherit log configuration)
     set_log_level(log_level)
     server = None
+    preserve_runtime_failure = False
+    shared_state_obj = SharedState(shared_state) if shared_state is not None else None
     try:
         server = GradientServer(
             recv_from_peer_addr=recv_from_peer_addr,
@@ -1339,11 +1376,10 @@ def _run_p2p_server_process(
             conn=conn,
         )
         # Attach shared state to server for syncing layer allocation
-        if shared_state is not None:
-            shared_state = SharedState(shared_state)  # Auto-converts dict to SharedState
-            server._shared_state = shared_state
+        if shared_state_obj is not None:
+            server._shared_state = shared_state_obj
             # Initialize shared state with current values
-            shared_state.update(
+            shared_state_obj.update(
                 block_start_index=server.block_start_index,
                 block_end_index=server.block_end_index,
                 model_name=server.model_name,
@@ -1352,7 +1388,7 @@ def _run_p2p_server_process(
                 weight_refit_mode="disk",
                 status=server.status.value,
             )
-            shared_state.update_runtime_state(
+            shared_state_obj.update_runtime_state(
                 status=server.status.value,
                 model_name=server.model_name,
                 init_stage="allocating" if scheduler_addr is not None else "idle",
@@ -1378,9 +1414,20 @@ def _run_p2p_server_process(
         logger.debug("P2P server received interrupt signal, shutting down...")
     except Exception as e:
         logger.exception(f"P2P server error: {e}")
+        preserve_runtime_failure = True
+        if shared_state_obj is not None:
+            shared_state_obj.update(status=ServerState.ERROR.value)
+            shared_state_obj.update_runtime_state(
+                status=ServerState.ERROR.value,
+                model_name=model_name,
+                init_stage="failed",
+                init_detail="P2P server startup failed.",
+                failure_reason=str(e),
+                fatal_error=True,
+            )
     finally:
         if server is not None:
-            server.shutdown()
+            server.shutdown(preserve_runtime_failure=preserve_runtime_failure)
 
 
 def launch_p2p_server_process(
