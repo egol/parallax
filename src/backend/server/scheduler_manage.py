@@ -12,7 +12,7 @@ from backend.server.rpc_connection_handler import RPCConnectionHandler
 from backend.server.static_config import get_model_info, get_node_join_command
 from parallax.cli import PUBLIC_INITIAL_PEERS, PUBLIC_RELAY_SERVERS
 from parallax_utils.logging_config import get_logger
-from scheduling.node import RequestSignal
+from scheduling.node import MLX_MEMORY_RESERVE_GB, RequestSignal
 from scheduling.scheduler import Scheduler
 
 logger = get_logger(__name__)
@@ -935,8 +935,12 @@ class SchedulerManage:
     def _node_memory_gb(self, node_info: Dict[str, Any]) -> float:
         gpu_num = node_info.get("gpu_num", 0) or 0
         gpu_memory = node_info.get("gpu_memory", 0) or 0
+        device = str(node_info.get("device", "") or "").strip().lower()
         try:
-            return max(float(gpu_num), 0.0) * max(float(gpu_memory), 0.0)
+            total = max(float(gpu_num), 0.0) * max(float(gpu_memory), 0.0)
+            if device == "mlx":
+                return max(0.0, total - MLX_MEMORY_RESERVE_GB)
+            return total
         except (TypeError, ValueError):
             return 0.0
 

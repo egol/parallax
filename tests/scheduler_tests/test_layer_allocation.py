@@ -19,7 +19,7 @@ from scheduling.layer_allocation import (
     GreedyLayerAllocator,
 )
 from scheduling.model_info import ModelInfo
-from scheduling.node import Node, NodeHardwareInfo
+from scheduling.node import MLX_MEMORY_RESERVE_GB, Node, NodeHardwareInfo
 from scheduling.node_management import NodeState
 
 from .test_utils import build_model_info, build_node_management
@@ -51,6 +51,32 @@ def test_capacity_sanity_check():
         capacity = node.get_decoder_layer_capacity()
         capacity_with_embed = node.get_decoder_layer_capacity(include_input_embed=True)
         assert capacity_with_embed <= capacity
+
+
+def test_mlx_capacity_reserves_unified_memory_headroom():
+    model = build_model_info(4)
+    hw = NodeHardwareInfo("mlx-host", 1, 10.0, "M3 Max", 24.0, 400.0, "mlx")
+    node = Node(
+        node_id=hw.node_id,
+        hardware=hw,
+        model_info=model,
+        param_mem_ratio=1.0,
+        kvcache_mem_ratio=1.0,
+    )
+    node.set_layer_allocation(0, 1)
+
+    assert node.effective_memory_gb == pytest.approx(24.0 - MLX_MEMORY_RESERVE_GB)
+    assert node.per_decoder_layer_kv_cache_memory == pytest.approx(
+        (24.0 - MLX_MEMORY_RESERVE_GB) * 1024 * 1024 * 1024
+    )
+
+    cuda_peer = Node(
+        node_id="cuda-peer",
+        hardware=NodeHardwareInfo("cuda-peer", 1, 10.0, "RTX", 24.0, 400.0, "cuda"),
+        model_info=model,
+        param_mem_ratio=1.0,
+    )
+    assert node.get_decoder_layer_capacity() < cuda_peer.get_decoder_layer_capacity()
 
 
 @pytest.mark.parametrize(

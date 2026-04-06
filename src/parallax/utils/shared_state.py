@@ -29,6 +29,7 @@ def _default_runtime_state(updated_at: Optional[str] = None) -> Dict[str, Any]:
         "current_file_bytes": None,
         "current_file_total_bytes": None,
         "failure_reason": "",
+        "fatal_error": False,
         "updated_at": timestamp,
     }
 

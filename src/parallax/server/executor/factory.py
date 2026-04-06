@@ -6,6 +6,7 @@ import argparse
 import os
 from typing import Any, List, Optional
 
+from parallax.utils.shared_state import SharedState
 from parallax.utils.utils import get_current_device
 from parallax_utils.logging_config import get_logger, set_log_level
 
@@ -127,6 +128,7 @@ def run_executor_process(args, shared_state=None, conn=None):
     """Run executor as a subprocess"""
     set_log_level(args.log_level)
     executor = None
+    shared = SharedState(shared_state) if shared_state is not None else None
     try:
         executor = create_from_args(args, shared_state, conn)
         executor.run_loop()
@@ -134,6 +136,16 @@ def run_executor_process(args, shared_state=None, conn=None):
         logger.debug("Executor received interrupt signal, shutting down...")
     except Exception as e:
         logger.exception(e)
+        if shared is not None:
+            shared.update_runtime_state(
+                status="error",
+                model_name=getattr(args, "model_path", None),
+                init_stage="failed",
+                init_detail="Executor startup failed.",
+                failure_reason=str(e),
+                fatal_error=True,
+            )
+        raise SystemExit(1) from e
     finally:
         if executor is not None:
             executor.shutdown()

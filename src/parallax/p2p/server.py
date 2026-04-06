@@ -41,6 +41,7 @@ _ACTIVE_INIT_NODE_ANNOUNCE_INTERVAL_SEC = float(
     os.environ.get("PARALLAX_NODE_INIT_ANNOUNCE_INTERVAL_SEC", "1.0")
 )
 _JOIN_RETRY_FOREVER_ENV = "PARALLAX_JOIN_RETRY_FOREVER"
+_INIT_SCHEDULER_LOSS_LIMIT = int(os.environ.get("PARALLAX_INIT_SCHEDULER_LOSS_LIMIT", "3"))
 
 
 def resolve_lattica_key_path(default: Optional[str] = None) -> Optional[str]:
@@ -434,6 +435,8 @@ class GradientServer:
         self._shared_state = None  # Will be set if running in subprocess mode
         self._max_build_attempts = 3
         self._max_join_attempts = 3
+        self._scheduler_reachable_once = False
+        self._scheduler_update_failure_count = 0
 
     def _node_announce_interval_seconds(self) -> float:
         if hasattr(self, "_shared_state") and self._shared_state is not None:
@@ -471,6 +474,32 @@ class GradientServer:
                 status=self.status.value,
                 model_name=self.model_name,
             )
+
+    def _in_active_init(self) -> bool:
+        if self._shared_state is None:
+            return self.status in {ServerState.JOINING, ServerState.INITIALIZING}
+        runtime_state = self._shared_state.get_runtime_state()
+        return runtime_state.get("init_stage") in {
+            "allocating",
+            "resolving-metadata",
+            "downloading",
+            "loading-shards",
+        }
+
+    def _mark_scheduler_loss_during_init(self, reason: str) -> None:
+        logger.error(reason)
+        self.status = ServerState.ERROR
+        self._sync_to_shared_state()
+        if self._shared_state is not None:
+            self._shared_state.update_runtime_state(
+                status=ServerState.ERROR.value,
+                model_name=self.model_name,
+                init_stage="failed",
+                init_detail="Lost scheduler during initialization.",
+                failure_reason=reason,
+                fatal_error=True,
+            )
+        self.stop_event.set()
 
     def _announce_current_range(self):
         if self.lattica is None:
@@ -695,6 +724,8 @@ class GradientServer:
                         )
                     else:
                         logger.info(f"Join scheduler response: {response}")
+                        self._scheduler_reachable_once = True
+                        self._scheduler_update_failure_count = 0
 
                         if not self.manual_layer_assignment:
                             self.block_start_index = response.get("start_layer")
@@ -970,6 +1001,8 @@ class GradientServer:
                                 if hasattr(response_future, "result")
                                 else response_future
                             )
+                            self._scheduler_reachable_once = True
+                            self._scheduler_update_failure_count = 0
 
                             # Print layer allocation information
                             if response and isinstance(response, dict):
@@ -1081,12 +1114,24 @@ class GradientServer:
                             self._announce_current_range()
                         self._announce_current_range()
                     except Exception as e:
+                        self._scheduler_update_failure_count += 1
                         logger.warning(
                             f"Failed to announce {self.prefix_id}_{self.lattica.peer_id()}: {e}",
                             exc_info=True,
                         )
+                        if (
+                            self.scheduler_addr is not None
+                            and self._scheduler_reachable_once
+                            and self._in_active_init()
+                            and self._scheduler_update_failure_count >= _INIT_SCHEDULER_LOSS_LIMIT
+                        ):
+                            self._mark_scheduler_loss_during_init(
+                                f"Lost scheduler during initialization after "
+                                f"{self._scheduler_update_failure_count} consecutive node-update failures: {e}"
+                            )
+                            break
 
-                    time.sleep(10)
+                    time.sleep(self._node_announce_interval_seconds())
             except Exception as e:
                 logger.exception(f"Module announcer thread error: {e}")
 

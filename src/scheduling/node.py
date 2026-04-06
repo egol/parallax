@@ -20,6 +20,8 @@ from scheduling.model_info import ModelInfo
 
 logger = get_logger(__name__)
 
+MLX_MEMORY_RESERVE_GB = 6.0
+
 
 @dataclass
 class NodeHardwareInfo:
@@ -207,6 +209,19 @@ class Node:
             self.rtt_to_nodes = {}
 
     @property
+    def effective_memory_gb(self) -> float:
+        """Return per-device allocatable memory after device-specific safety reserve."""
+        total_memory_gb = max(float(self.hardware.memory_gb), 0.0)
+        if self.hardware.device == "mlx":
+            return max(0.0, total_memory_gb - MLX_MEMORY_RESERVE_GB)
+        return total_memory_gb
+
+    @property
+    def effective_total_memory_gb(self) -> float:
+        """Return total allocatable memory across all local devices."""
+        return max(float(self.hardware.num_gpus), 0.0) * self.effective_memory_gb
+
+    @property
     def max_requests(self) -> int:
         """Max concurrent requests bounded by KV budget using sequence length."""
         if self._force_max_concurrent_requests:
@@ -229,7 +244,7 @@ class Node:
             num_key_value_heads=self.model_info.num_kv_heads,
             head_dim=self.model_info.head_size,
             elem_bytes=elem_bytes,
-            memory_gb=self.hardware.memory_gb,
+            memory_gb=self.effective_memory_gb,
             head_dim_k=self.model_info.head_size_k,
             head_dim_v=self.model_info.head_size_v,
         )
@@ -276,8 +291,7 @@ class Node:
         Capacity is measured using the parameter memory budget on the device.
         """
         available_memory_bytes = floor(
-            self.hardware.num_gpus
-            * self.hardware.memory_gb
+            self.effective_total_memory_gb
             * 1024
             * 1024
             * 1024
@@ -310,8 +324,7 @@ class Node:
             return None
         return floor(
             (
-                self.hardware.num_gpus
-                * self.hardware.memory_gb
+                self.effective_total_memory_gb
                 * 1024
                 * 1024
                 * 1024

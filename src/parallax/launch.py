@@ -64,22 +64,33 @@ def _stop_executor_processes(executor_subprocs):
 
 
 def _wait_executors_check_layer_change(shared_state: SharedState, executor_subprocs):
-    """Wait for executor processes and check if layer allocation changed.
+    """Wait for executor processes and determine the next launcher action.
 
     Returns:
-        True if layer allocation changed (need to reload executors),
-        False if all executors exited normally.
+        "reload" if layer allocation changed,
+        "failed" if executor startup/runtime ended unexpectedly,
+        "finished" if all executors exited cleanly after READY.
     """
-    while any(proc.is_alive() for proc in executor_subprocs):
+    while True:
         for proc in executor_subprocs:
             if proc.is_alive():
                 proc.join(timeout=1.0)  # Check every second
 
         if shared_state.get_layer_allocation_changed():
-            return True
+            return "reload"
 
-    # Check race condition: layer allocation changed after all processes exited
-    return shared_state.get_layer_allocation_changed()
+        runtime_state = shared_state.get_runtime_state()
+        init_stage = runtime_state.get("init_stage")
+        finished = [proc for proc in executor_subprocs if proc.exitcode is not None]
+        if finished:
+            if len(finished) != len(executor_subprocs):
+                return "failed"
+            if any((proc.exitcode or 0) != 0 for proc in finished):
+                return "failed"
+            return "finished" if init_stage == "ready" else "failed"
+
+        if not any(proc.is_alive() for proc in executor_subprocs):
+            return "finished" if init_stage == "ready" else "failed"
 
 
 def _is_test_mode() -> bool:
@@ -155,6 +166,7 @@ if __name__ == "__main__":
     http_server_process = None
     executor_subprocs = []
     test_mode = False
+    exit_code = 0
     # Shared state for layer allocation info (used when P2P server is in subprocess)
     shared_state = SharedState.create()
     shared_state.set_status(ServerState.JOINING.value)
@@ -387,7 +399,10 @@ if __name__ == "__main__":
                     executor_subprocs = _launch_executor_processes(args, shared_state, conn_refit)
 
                     # Wait for executors and restart if layer allocation changes
-                    if _wait_executors_check_layer_change(shared_state, executor_subprocs):
+                    executor_result = _wait_executors_check_layer_change(
+                        shared_state, executor_subprocs
+                    )
+                    if executor_result == "reload":
                         logger.warning("Layer allocation changed! Stopping executors to reload...")
                         # Reset flag and set status to INITIALIZING
                         shared_state.update(
@@ -419,8 +434,14 @@ if __name__ == "__main__":
                             f"Reloading executor with layers [{args.start_layer}, {args.end_layer})"
                         )
                         continue
+                    if executor_result == "failed":
+                        runtime_state = shared_state.get_runtime_state()
+                        failure_reason = runtime_state.get("failure_reason") or (
+                            "Executor exited before reaching READY."
+                        )
+                        raise RuntimeError(failure_reason)
 
-                    # All processes exited normally
+                    # All processes exited after a clean READY transition.
                     break
                 except KeyboardInterrupt:
                     logger.debug("Received interrupt signal, shutting down...")
@@ -433,6 +454,7 @@ if __name__ == "__main__":
                         init_stage="failed",
                         init_detail="Executor startup failed.",
                         failure_reason=str(e),
+                        fatal_error=True,
                     )
                     # Shutdown all executor processes on error
                     from parallax.server.executor.factory import stop_executor_process
@@ -440,6 +462,7 @@ if __name__ == "__main__":
                     for proc in executor_subprocs:
                         if proc.is_alive():
                             stop_executor_process(proc)
+                    exit_code = 1
                     raise
     except KeyboardInterrupt:
         logger.debug("Received interrupt signal, shutting down...")
@@ -451,7 +474,9 @@ if __name__ == "__main__":
             init_stage="failed",
             init_detail="Parallax worker startup failed.",
             failure_reason=str(e),
+            fatal_error=True,
         )
+        exit_code = 1
     finally:
         # Shutdown all processes
         logger.debug("Shutting down all processes...")
@@ -473,3 +498,5 @@ if __name__ == "__main__":
             _stop_http_server_for_mode(http_server_process, test_mode)
 
         logger.debug("All processes shut down.")
+    if exit_code != 0:
+        raise SystemExit(exit_code)
