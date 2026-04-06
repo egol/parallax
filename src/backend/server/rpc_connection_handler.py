@@ -1,4 +1,5 @@
 from lattica import ConnectionHandler, Lattica, rpc_method, rpc_stream, rpc_stream_iter
+from lattica.connection_handler import ServiceStub
 
 from parallax.p2p.proto import forward_pb2
 from parallax_utils.logging_config import get_logger
@@ -27,6 +28,7 @@ class RPCConnectionHandler(ConnectionHandler):
     ):
         # Initialize the base class
         super().__init__(lattica)
+        self.lattica = lattica
         self.scheduler = scheduler
         self.http_port = http_port
         self.scheduler_manage = scheduler_manage
@@ -55,6 +57,9 @@ class RPCConnectionHandler(ConnectionHandler):
             grouped_requests.setdefault(next_peer_id, []).append(req)
         return grouped_requests
 
+    def _get_transformer_stub(self, peer_id: str) -> ServiceStub:
+        return ServiceStub(self, peer_id, "TransformerConnectionHandler")
+
     @rpc_stream
     def rpc_pp_forward(
         self,
@@ -64,7 +69,7 @@ class RPCConnectionHandler(ConnectionHandler):
         try:
             grouped_requests = self._group_requests_by_next_peer(request.reqs)
             for next_peer_id, requests in grouped_requests.items():
-                stub = self.get_stub(next_peer_id)
+                stub = self._get_transformer_stub(next_peer_id)
                 new_forward_request = forward_pb2.ForwardRequest()
                 new_forward_request.forward_mode = request.forward_mode
                 new_forward_request.reqs.extend(requests)
@@ -90,7 +95,7 @@ class RPCConnectionHandler(ConnectionHandler):
                     grouped_requests.setdefault(peer_id, []).append(req)
 
             for peer_id, requests in grouped_requests.items():
-                stub = self.get_stub(peer_id)
+                stub = self._get_transformer_stub(peer_id)
                 new_abort_request = forward_pb2.AbortRequest()
                 new_abort_request.reqs.extend(requests)
                 response = stub.rpc_abort(new_abort_request)
