@@ -81,6 +81,34 @@ def test_scheduler_mode_still_announces_current_range(monkeypatch):
     assert record["value"] == {"block_start_index": 20, "block_end_index": 31}
 
 
+def test_send_notify_skips_when_layer_allocation_is_unknown(caplog):
+    request = forward_pb2.ForwardRequest()
+    req = request.reqs.add()
+    req.rid = "req-1"
+    req.output_length = 3
+
+    p2p_server.send_notify(None, None, None, request, "started")
+
+    assert "Skip started notification because layer allocation is not available yet" in caplog.text
+
+
+def test_sync_to_shared_state_refreshes_connection_handler_layer_allocation(monkeypatch):
+    monkeypatch.setenv("PARALLAX_ROLE", "compute-node")
+    server = build_server()
+    server.block_start_index = 20
+    server.block_end_index = 31
+    server.connection_handler = type(
+        "FakeHandler",
+        (),
+        {"block_start_index": None, "block_end_index": None},
+    )()
+
+    server._sync_to_shared_state()
+
+    assert server.connection_handler.block_start_index == 20
+    assert server.connection_handler.block_end_index == 31
+
+
 def test_participant_worker_still_fails_after_retry_budget(monkeypatch):
     monkeypatch.delenv("PARALLAX_JOIN_RETRY_FOREVER", raising=False)
     monkeypatch.setenv("PARALLAX_ROLE", "compute-node")
@@ -225,6 +253,92 @@ def test_get_node_info_update_uses_cached_peers_without_discovery(monkeypatch):
     assert info["rtt_to_nodes"]["existing-peer"] == 42
     assert info["rtt_to_nodes"]["scheduler-peer"] == 12.0
     assert server.lattica.rtt_calls == ["existing-peer", "scheduler-peer"]
+
+
+def test_get_node_info_initial_join_falls_back_to_explicit_scheduler_peer(monkeypatch):
+    monkeypatch.setenv("PARALLAX_ROLE", "host")
+    monkeypatch.setattr("parallax.p2p.server.detect_node_hardware", lambda peer_id: {})
+    monkeypatch.setattr("parallax.p2p.server.time.sleep", lambda *_args, **_kwargs: None)
+    server = build_server()
+    server.lattica = FakeRttLattica()
+    server.scheduler_peer_id = "scheduler-peer"
+    server.rtt_last_update = 0
+    monkeypatch.setattr(server, "_discover_candidate_peer_ids", lambda: [])
+
+    info = server.get_node_info(is_update=False)
+
+    assert info["node_id"] == "self-peer"
+    assert info["rtt_to_nodes"]["scheduler-peer"] == 100
+
+
+def test_get_node_info_initial_join_does_not_spend_30_seconds_on_scheduler_rtt(monkeypatch):
+    monkeypatch.setenv("PARALLAX_ROLE", "host")
+    monkeypatch.setattr("parallax.p2p.server.detect_node_hardware", lambda peer_id: {})
+    monkeypatch.setattr("parallax.p2p.server.time.sleep", lambda *_args, **_kwargs: None)
+    server = build_server()
+    server.lattica = CountingRttLattica()
+    server.scheduler_peer_id = "scheduler-peer"
+    server.rtt_last_update = 0
+    monkeypatch.setattr(server, "_discover_candidate_peer_ids", lambda: ["scheduler-peer"])
+
+    info = server.get_node_info(is_update=False)
+
+    assert info["rtt_to_nodes"]["scheduler-peer"] == 12.0
+    assert server.lattica.rtt_calls == ["scheduler-peer"]
+
+
+def test_scheduler_node_join_can_use_local_http_fallback(monkeypatch):
+    monkeypatch.setenv("PARALLAX_ROLE", "host")
+    server = build_server()
+    server._local_scheduler_http_url = "http://127.0.0.1:3301"
+    calls = []
+
+    def fake_post(path, payload):
+        calls.append((path, payload))
+        return {"data": {"start_layer": 0, "end_layer": 20}}
+
+    monkeypatch.setattr(server, "_post_local_scheduler_http", fake_post)
+
+    response = server._scheduler_node_join({"node_id": "self-peer"})
+
+    assert response == {"start_layer": 0, "end_layer": 20}
+    assert calls == [("/internal/node_join", {"node_id": "self-peer"})]
+
+
+def test_scheduler_node_update_can_use_local_http_fallback(monkeypatch):
+    monkeypatch.setenv("PARALLAX_ROLE", "host")
+    server = build_server()
+    server._local_scheduler_http_url = "http://127.0.0.1:3301"
+    calls = []
+
+    def fake_post(path, payload):
+        calls.append((path, payload))
+        return {"layer_allocation": {"start_layer": 0}, "refit_request": {"version": 1}}
+
+    monkeypatch.setattr(server, "_post_local_scheduler_http", fake_post)
+
+    layer_allocation, refit_request = server._scheduler_node_update({"node_id": "self-peer"})
+
+    assert layer_allocation == {"start_layer": 0}
+    assert refit_request == {"version": 1}
+    assert calls == [("/internal/node_update", {"node_id": "self-peer"})]
+
+
+def test_scheduler_node_leave_can_use_local_http_fallback(monkeypatch):
+    monkeypatch.setenv("PARALLAX_ROLE", "host")
+    server = build_server()
+    server._local_scheduler_http_url = "http://127.0.0.1:3301"
+    calls = []
+
+    def fake_post(path, payload):
+        calls.append((path, payload))
+        return {"data": {}}
+
+    monkeypatch.setattr(server, "_post_local_scheduler_http", fake_post)
+
+    server._scheduler_node_leave({"node_id": "self-peer"})
+
+    assert calls == [("/internal/node_leave", {"node_id": "self-peer"})]
 
 
 def _build_abort_req(rid, routing_table):

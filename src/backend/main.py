@@ -239,6 +239,61 @@ async def scheduler_bootstrap(raw_request: Request):
         )
 
 
+@app.post("/internal/node_join")
+async def internal_node_join(raw_request: Request):
+    if scheduler_manage is None or scheduler_manage.connection_handler is None:
+        return JSONResponse(
+            content={"error": "scheduler control plane is not initialized"},
+            status_code=503,
+        )
+    request_data = await raw_request.json()
+    scheduler_manage.register_discovered_node(request_data)
+    if scheduler_manage.scheduler is None:
+        return JSONResponse(content={"data": {}}, status_code=200)
+    return JSONResponse(
+        content={"data": scheduler_manage.connection_handler.node_join(request_data)},
+        status_code=200,
+    )
+
+
+@app.post("/internal/node_update")
+async def internal_node_update(raw_request: Request):
+    if scheduler_manage is None or scheduler_manage.connection_handler is None:
+        return JSONResponse(
+            content={"error": "scheduler control plane is not initialized"},
+            status_code=503,
+        )
+    request_data = await raw_request.json()
+    scheduler_manage.register_discovered_node(request_data)
+    if scheduler_manage.scheduler is None:
+        return JSONResponse(
+            content={"layer_allocation": {}, "refit_request": {}},
+            status_code=200,
+        )
+    layer_allocation, refit_request = scheduler_manage.connection_handler.node_update(request_data)
+    return JSONResponse(
+        content={
+            "layer_allocation": layer_allocation,
+            "refit_request": refit_request,
+        },
+        status_code=200,
+    )
+
+
+@app.post("/internal/node_leave")
+async def internal_node_leave(raw_request: Request):
+    if scheduler_manage is None or scheduler_manage.connection_handler is None:
+        return JSONResponse(
+            content={"error": "scheduler control plane is not initialized"},
+            status_code=503,
+        )
+    request_data = await raw_request.json()
+    return JSONResponse(
+        content={"data": scheduler_manage.connection_handler.node_leave(request_data)},
+        status_code=200,
+    )
+
+
 @app.get("/node/join/command")
 async def node_join_command():
     peer_id = scheduler_manage.get_peer_id()

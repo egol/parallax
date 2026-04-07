@@ -12,6 +12,9 @@ import json
 
 import httpx
 
+_NODE_JOIN_SCHEDULER_READY_TIMEOUT_SEC = 30
+_NODE_JOIN_INITIAL_ALLOCATION_WAIT_SEC = 5
+
 
 class RPCConnectionHandler(ConnectionHandler):
     """
@@ -137,7 +140,7 @@ class RPCConnectionHandler(ConnectionHandler):
             self.scheduler_manage.register_discovered_node(message)
         if self.scheduler is None:
             if self.scheduler_manage is None or not self.scheduler_manage.wait_for_scheduler_ready(
-                timeout=300
+                timeout=_NODE_JOIN_SCHEDULER_READY_TIMEOUT_SEC
             ):
                 logger.warning("Timed out waiting for scheduler readiness during node_join")
                 return {}
@@ -146,7 +149,12 @@ class RPCConnectionHandler(ConnectionHandler):
             node = self.build_node(message)
             self.scheduler.enqueue_join(node)
 
-            response = self.wait_layer_allocation(node.node_id, wait_seconds=300)
+            # Do not hold node_join open for the full allocation window. Workers can
+            # remain in JOINING and pick up layer assignments via heartbeats without
+            # tearing down and rebuilding their local P2P listener.
+            response = self.wait_layer_allocation(
+                node.node_id, wait_seconds=_NODE_JOIN_INITIAL_ALLOCATION_WAIT_SEC
+            )
             logger.debug(f"node_join response: {response}")
             return response
         except Exception as e:

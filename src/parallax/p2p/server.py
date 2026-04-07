@@ -46,6 +46,7 @@ _NODE_UPDATE_RPC_TIMEOUT_SEC = float(
 )
 _JOIN_RETRY_FOREVER_ENV = "PARALLAX_JOIN_RETRY_FOREVER"
 _INIT_SCHEDULER_LOSS_LIMIT = int(os.environ.get("PARALLAX_INIT_SCHEDULER_LOSS_LIMIT", "3"))
+_LOCAL_SCHEDULER_HTTP_TIMEOUT_SEC = 5.0
 
 
 def resolve_lattica_key_path(default: Optional[str] = None) -> Optional[str]:
@@ -89,6 +90,13 @@ class ServerInfo:
 
 
 def send_notify(notify_url, block_start_index, block_end_index, request, status):
+    if block_start_index is None or block_end_index is None:
+        logger.warning(
+            "Skip %s notification because layer allocation is not available yet",
+            status,
+        )
+        return
+
     payload = [
         {
             "session_id": req.rid,
@@ -442,6 +450,7 @@ class GradientServer:
         self._scheduler_reachable_once = False
         self._scheduler_update_failure_count = 0
         self._last_build_error = None
+        self._local_scheduler_http_url = os.getenv("PARALLAX_LOCAL_SCHEDULER_HTTP_URL", "").strip()
 
     @staticmethod
     def _is_addr_in_use_error(error: Exception | str | None) -> bool:
@@ -472,8 +481,50 @@ class GradientServer:
     def _join_attempt_is_fatal(self, attempt: int) -> bool:
         return not self._join_retry_forever() and attempt >= self._max_join_attempts
 
+    def _use_local_scheduler_http(self) -> bool:
+        return bool(self._local_scheduler_http_url)
+
+    def _post_local_scheduler_http(self, path: str, payload: dict) -> dict:
+        if not self._local_scheduler_http_url:
+            raise RuntimeError("Local scheduler HTTP URL is not configured")
+        response = httpx.post(
+            f"{self._local_scheduler_http_url}{path}",
+            json=payload,
+            timeout=_LOCAL_SCHEDULER_HTTP_TIMEOUT_SEC,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def _scheduler_node_join(self, node_info: dict):
+        if self._use_local_scheduler_http():
+            payload = self._post_local_scheduler_http("/internal/node_join", node_info)
+            return payload.get("data", {})
+        response = self.scheduler_stub.node_join(node_info)
+        return response.result(timeout=300)
+
+    def _scheduler_node_update(self, node_info: dict):
+        if self._use_local_scheduler_http():
+            payload = self._post_local_scheduler_http("/internal/node_update", node_info)
+            return payload.get("layer_allocation", {}), payload.get("refit_request", {})
+        response_future = self.scheduler_stub.node_update(node_info)
+        return (
+            response_future.result(timeout=self._node_update_rpc_timeout_seconds())
+            if hasattr(response_future, "result")
+            else response_future
+        )
+
+    def _scheduler_node_leave(self, node_info: dict):
+        if self._use_local_scheduler_http():
+            self._post_local_scheduler_http("/internal/node_leave", node_info)
+            return
+        self.scheduler_stub.node_leave(node_info)
+
     def _sync_to_shared_state(self):
         """Sync current layer allocation and status to shared state if available"""
+        if self.connection_handler is not None:
+            self.connection_handler.block_start_index = self.block_start_index
+            self.connection_handler.block_end_index = self.block_end_index
+
         if hasattr(self, "_shared_state") and self._shared_state is not None:
             node_id = self.lattica.peer_id() if self.lattica is not None else None
             self._shared_state.update(
@@ -767,8 +818,7 @@ class GradientServer:
                     if self.manual_layer_assignment:
                         node_info["manual_layer_assignment"] = True
 
-                    response = self.scheduler_stub.node_join(node_info)
-                    response = response.result(timeout=300)
+                    response = self._scheduler_node_join(node_info)
                     if not response:
                         self.status = ServerState.JOINING
                         if self._shared_state is not None:
@@ -1047,16 +1097,8 @@ class GradientServer:
                     # Announce the range ID
                     try:
                         if self.scheduler_peer_id is not None:
-                            response_future = self.scheduler_stub.node_update(
+                            response, refit_message = self._scheduler_node_update(
                                 self.get_node_info(is_update=True)
-                            )
-                            # Get the response result
-                            response, refit_message = (
-                                response_future.result(
-                                    timeout=self._node_update_rpc_timeout_seconds()
-                                )
-                                if hasattr(response_future, "result")
-                                else response_future
                             )
                             self._scheduler_reachable_once = True
                             self._scheduler_update_failure_count = 0
@@ -1252,7 +1294,14 @@ class GradientServer:
                     )
                     time.sleep(1)
 
-                if len(all_peers) == 0 or self.scheduler_peer_id not in all_peers:
+                if self.scheduler_peer_id is not None and self.scheduler_peer_id not in all_peers:
+                    logger.warning(
+                        "Scheduler peer id was not discovered before initial join; "
+                        "continuing with an explicit scheduler fallback."
+                    )
+                    all_peers.append(self.scheduler_peer_id)
+
+                if len(all_peers) == 0:
                     logger.warning("No peers found or scheduler peer id not found.")
                     logger.warning(
                         "Returning empty node info because this is not an update heartbeat."
@@ -1261,7 +1310,8 @@ class GradientServer:
 
                 for peer_id in all_peers:
                     rtt = None
-                    for _ in range(30):
+                    max_rtt_attempts = 1 if peer_id == self.scheduler_peer_id else 30
+                    for _ in range(max_rtt_attempts):
                         try:
                             raw_rtt = self.lattica.get_peer_rtt(peer_id)
                             if raw_rtt is not None:
@@ -1269,6 +1319,12 @@ class GradientServer:
                         except Exception as e:
                             logger.warning(f"Failed to get rtt to {peer_id}: {e}")
                         if rtt is not None:
+                            break
+                        if peer_id == self.scheduler_peer_id:
+                            logger.warning(
+                                f"Failed to get scheduler RTT to {peer_id}; "
+                                "using a fallback value for initial join."
+                            )
                             break
                         logger.warning(f"Failed to get rtt to {peer_id}, waiting for 1 second.")
                         time.sleep(1)
@@ -1354,11 +1410,11 @@ class GradientServer:
         if (
             self.scheduler_addr is not None
             and self.lattica is not None
-            and self.scheduler_stub is not None
+            and (self.scheduler_stub is not None or self._use_local_scheduler_http())
         ):
             try:
                 logger.info(f"Leave scheduler: {self.lattica.peer_id()}")
-                self.scheduler_stub.node_leave(self.get_node_info(is_update=True))
+                self._scheduler_node_leave(self.get_node_info(is_update=True))
             except Exception as e:
                 logger.warning(f"Failed to leave scheduler cleanly: {e}")
 

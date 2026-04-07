@@ -10,6 +10,9 @@ class _SchedulerManageStub:
     def __init__(self, run_impl):
         self.run_impl = run_impl
         self.run_calls = []
+        self.scheduler = object()
+        self.connection_handler = None
+        self.registered_nodes = []
 
     def is_running(self):
         return False
@@ -32,6 +35,20 @@ class _SchedulerManageStub:
                 },
             }
         }
+
+    def register_discovered_node(self, message):
+        self.registered_nodes.append(message)
+
+
+class _ConnectionHandlerStub:
+    def node_join(self, message):
+        return {"joined": message.get("node_id")}
+
+    def node_update(self, message):
+        return {"start_layer": 0, "node_id": message.get("node_id")}, {"version": 1}
+
+    def node_leave(self, message):
+        return {"left": message.get("node_id")}
 
 
 def test_scheduler_init_triggers_snapshot_download_progress(monkeypatch, tmp_path, caplog):
@@ -168,3 +185,41 @@ def test_scheduler_init_triggers_snapshot_download_progress(monkeypatch, tmp_pat
     assert any(
         "downloaded full model snapshot" in message.lower() for message in log_messages
     ), log_messages
+
+
+def test_internal_scheduler_control_plane_endpoints(monkeypatch):
+    scheduler_manage = _SchedulerManageStub(lambda *_args: None)
+    scheduler_manage.connection_handler = _ConnectionHandlerStub()
+    monkeypatch.setattr(backend_main, "scheduler_manage", scheduler_manage)
+
+    with TestClient(backend_main.app) as client:
+        join_response = client.post("/internal/node_join", json={"node_id": "node-a"})
+        update_response = client.post("/internal/node_update", json={"node_id": "node-a"})
+        leave_response = client.post("/internal/node_leave", json={"node_id": "node-a"})
+
+    assert join_response.status_code == 200
+    assert join_response.json() == {"data": {"joined": "node-a"}}
+    assert update_response.status_code == 200
+    assert update_response.json() == {
+        "layer_allocation": {"start_layer": 0, "node_id": "node-a"},
+        "refit_request": {"version": 1},
+    }
+    assert leave_response.status_code == 200
+    assert leave_response.json() == {"data": {"left": "node-a"}}
+
+
+def test_internal_scheduler_control_plane_endpoints_return_quickly_without_scheduler(monkeypatch):
+    scheduler_manage = _SchedulerManageStub(lambda *_args: None)
+    scheduler_manage.scheduler = None
+    scheduler_manage.connection_handler = _ConnectionHandlerStub()
+    monkeypatch.setattr(backend_main, "scheduler_manage", scheduler_manage)
+
+    with TestClient(backend_main.app) as client:
+        join_response = client.post("/internal/node_join", json={"node_id": "node-a"})
+        update_response = client.post("/internal/node_update", json={"node_id": "node-a"})
+
+    assert join_response.status_code == 200
+    assert join_response.json() == {"data": {}}
+    assert update_response.status_code == 200
+    assert update_response.json() == {"layer_allocation": {}, "refit_request": {}}
+    assert scheduler_manage.registered_nodes == [{"node_id": "node-a"}, {"node_id": "node-a"}]
