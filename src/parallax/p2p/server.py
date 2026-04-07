@@ -433,6 +433,7 @@ class GradientServer:
         self.manual_layer_assignment = block_end_index is not None and block_start_index is not None
         self.conn = conn
         self.display_name = os.getenv("PARALLAX_DISPLAY_NAME", "").strip()
+        self.mycelia_node_id = os.getenv("PARALLAX_MYCELIA_NODE_ID", "").strip()
         self.role = os.getenv("PARALLAX_ROLE", "").strip()
         self.joined_at = time.time()
 
@@ -1346,6 +1347,7 @@ class GradientServer:
             "is_active": self._get_status() == ServerState.READY.value,
             "last_refit_time": self.last_refit_time,
             "display_name": self.display_name,
+            "mycelia_node_id": self.mycelia_node_id,
             "role": self.role,
             "joined_at": self.joined_at,
         }

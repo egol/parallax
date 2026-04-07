@@ -362,6 +362,7 @@ class RPCConnectionHandler(ConnectionHandler):
         tflops_fp16 = hardware_json.get("tflops_fp16")
         gpu_name = hardware_json.get("gpu_name")
         memory_gb = hardware_json.get("memory_gb")
+        memory_gb_is_effective = hardware_json.get("memory_gb_is_effective", False)
         memory_bandwidth_gbps = hardware_json.get("memory_bandwidth_gbps")
         device = hardware_json.get("device")
         return NodeHardwareInfo(
@@ -372,4 +373,5 @@ class RPCConnectionHandler(ConnectionHandler):
             memory_gb=memory_gb,
             memory_bandwidth_gbps=memory_bandwidth_gbps,
             device=device,
+            memory_gb_is_effective=bool(memory_gb_is_effective),
         )

@@ -52,6 +52,7 @@ def _apply_test_hardware_overrides(payload: Dict[str, Any]) -> Dict[str, Any]:
     memory_gb = _env_float("PARALLAX_TEST_OVERRIDE_MEMORY_GB")
     if memory_gb is not None:
         payload["memory_gb"] = memory_gb
+        payload["memory_gb_is_effective"] = True
 
     tflops_fp16 = _env_float("PARALLAX_TEST_OVERRIDE_TFLOPS_FP16")
     if tflops_fp16 is not None:

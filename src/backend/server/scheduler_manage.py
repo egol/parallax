@@ -533,16 +533,17 @@ class SchedulerManage:
         entry = self.discovered_nodes.get(node_id)
         return entry if isinstance(entry, dict) else None
 
-    def _node_identity_metadata(self, node_id: str) -> tuple[str, str, float]:
+    def _node_identity_metadata(self, node_id: str) -> tuple[str, str, str, float]:
         entry = self._discovered_entry_for_node(node_id)
         if not entry:
-            return "", "", 0.0
+            return "", "", "", 0.0
 
         payload = entry.get("payload")
         if not isinstance(payload, dict):
             payload = {}
 
         display_name = payload.get("display_name")
+        mycelia_node_id = payload.get("mycelia_node_id")
         role = payload.get("role")
         joined_at = payload.get("joined_at")
         if joined_at in (None, "", 0):
@@ -555,6 +556,7 @@ class SchedulerManage:
 
         return (
             display_name if isinstance(display_name, str) else "",
+            mycelia_node_id if isinstance(mycelia_node_id, str) else "",
             role if isinstance(role, str) else "",
             joined_at_value,
         )
@@ -875,7 +877,9 @@ class SchedulerManage:
         stage_index: Optional[int] = None,
     ):
         latency_ms = node.layer_latency_ms
-        display_name, role, joined_at = self._node_identity_metadata(node.node_id)
+        display_name, mycelia_node_id, role, joined_at = self._node_identity_metadata(
+            node.node_id
+        )
         return {
             "node_id": node.node_id,
             "status": NODE_STATUS_AVAILABLE if node.is_active else NODE_STATUS_WAITING,
@@ -883,6 +887,9 @@ class SchedulerManage:
             "gpu_num": node.hardware.num_gpus,
             "gpu_name": node.hardware.gpu_name,
             "gpu_memory": node.hardware.memory_gb,
+            "memory_gb_is_effective": bool(
+                getattr(node.hardware, "memory_gb_is_effective", False)
+            ),
             "device": node.hardware.device,
             "start_layer": node.start_layer,
             "end_layer": node.end_layer,
@@ -898,6 +905,7 @@ class SchedulerManage:
             "is_active": node.is_active,
             "layer_latency_ms": None if latency_ms == float("inf") else latency_ms,
             "display_name": display_name,
+            "mycelia_node_id": mycelia_node_id,
             "role": role,
             "joined_at": joined_at,
             "runtime": self._runtime_snapshot_for_node(node.node_id),
@@ -908,7 +916,9 @@ class SchedulerManage:
         if not isinstance(hardware, dict):
             hardware = {}
         node_id = self._extract_node_id(node_payload) or ""
-        display_name, role, joined_at = self._node_identity_metadata(node_id)
+        display_name, mycelia_node_id, role, joined_at = self._node_identity_metadata(
+            node_id
+        )
         return {
             "node_id": node_id,
             "status": NODE_STATUS_WAITING,
@@ -916,6 +926,7 @@ class SchedulerManage:
             "gpu_num": hardware.get("num_gpus", 0),
             "gpu_name": hardware.get("gpu_name", ""),
             "gpu_memory": hardware.get("memory_gb", 0),
+            "memory_gb_is_effective": bool(hardware.get("memory_gb_is_effective", False)),
             "device": hardware.get("device", ""),
             "start_layer": node_payload.get("start_layer"),
             "end_layer": node_payload.get("end_layer"),
@@ -927,6 +938,7 @@ class SchedulerManage:
             "is_active": bool(node_payload.get("is_active", False)),
             "layer_latency_ms": node_payload.get("layer_latency_ms"),
             "display_name": display_name,
+            "mycelia_node_id": mycelia_node_id,
             "role": role,
             "joined_at": joined_at,
             "runtime": self._runtime_snapshot_from_payload(node_payload),
@@ -935,10 +947,11 @@ class SchedulerManage:
     def _node_memory_gb(self, node_info: Dict[str, Any]) -> float:
         gpu_num = node_info.get("gpu_num", 0) or 0
         gpu_memory = node_info.get("gpu_memory", 0) or 0
+        memory_gb_is_effective = bool(node_info.get("memory_gb_is_effective", False))
         device = str(node_info.get("device", "") or "").strip().lower()
         try:
             total = max(float(gpu_num), 0.0) * max(float(gpu_memory), 0.0)
-            if device == "mlx":
+            if device == "mlx" and not memory_gb_is_effective:
                 return max(0.0, total - get_mlx_memory_reserve_gb())
             return total
         except (TypeError, ValueError):
@@ -946,11 +959,13 @@ class SchedulerManage:
 
     def _empty_cluster_status_snapshot(self, snapshot_stale: bool) -> Dict[str, Any]:
         generated_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        total_layers = self.scheduler.model_info.num_layers if self.scheduler is not None else 0
         return {
             "type": "cluster_status",
             "data": {
                 "status": NODE_STATUS_WAITING,
                 "model_name": self.model_name,
+                "total_layers": total_layers,
                 "init_nodes_num": self.init_nodes_num,
                 "initialized": self.is_initialized(),
                 "scheduler_peer_id": self.get_peer_id(),
@@ -996,11 +1011,13 @@ class SchedulerManage:
         topology = self.get_topology_snapshot(
             per_pipeline_min, total_capacity, current_capacity
         )
+        total_layers = self.scheduler.model_info.num_layers if self.scheduler is not None else 0
         return {
             "type": "cluster_status",
             "data": {
                 "status": self.get_schedule_status(),
                 "model_name": self.model_name,
+                "total_layers": total_layers,
                 "init_nodes_num": self.init_nodes_num,
                 "initialized": self.is_initialized(),
                 "scheduler_peer_id": self.get_peer_id(),

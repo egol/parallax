@@ -55,6 +55,7 @@ class NodeHardwareInfo:
     memory_gb: float
     memory_bandwidth_gbps: float
     device: str
+    memory_gb_is_effective: bool = False
 
 
 @dataclass
@@ -228,6 +229,8 @@ class Node:
     def effective_memory_gb(self) -> float:
         """Return per-device allocatable memory after device-specific safety reserve."""
         total_memory_gb = max(float(self.hardware.memory_gb), 0.0)
+        if self.hardware.memory_gb_is_effective:
+            return total_memory_gb
         if self.hardware.device == "mlx":
             return max(0.0, total_memory_gb - get_mlx_memory_reserve_gb())
         return total_memory_gb
