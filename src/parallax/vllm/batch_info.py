@@ -319,6 +319,25 @@ def form_vllm_batch_decode(
                     f"len={len(output_ids)}"
                 )
 
+        expected_output_len = max(0, req.total_length - len(getattr(req, "input_ids", None) or []))
+        logger.debug(
+            "[Decode] req_id=%s current_position=%s prompt_len=%s expected_output_len=%s "
+            "recovered_output_len=%s recovery_sources={cached:%s,scheduler:%s}",
+            req.request_id,
+            req.total_length,
+            len(getattr(req, "input_ids", None) or []),
+            expected_output_len,
+            len(output_ids),
+            bool(hasattr(model_runner, "requests") and model_runner.requests.get(req.request_id) is not None),
+            bool(scheduler is not None and scheduler.get_running_request(req.request_id) is not None),
+        )
+        if expected_output_len > 0 and not output_ids:
+            raise RuntimeError(
+                "Decode state desynchronized for request "
+                f"{req.request_id}: expected {expected_output_len} generated token(s) "
+                "from current_position but found no output_ids in cached request state."
+            )
+
         if output_ids:
             all_token_ids[req.request_id] = output_ids
             last_token = output_ids[-1]

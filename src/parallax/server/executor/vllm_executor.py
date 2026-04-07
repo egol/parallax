@@ -51,6 +51,25 @@ def _extract_vllm_hidden_states(execute_model_state: Any):
     )
 
 
+def _extract_vllm_residual_states(execute_model_state: Any):
+    if execute_model_state is None:
+        return None
+    if hasattr(execute_model_state, "residual"):
+        residual = execute_model_state.residual
+        if residual is not None:
+            return residual
+    if isinstance(execute_model_state, dict):
+        residual = execute_model_state.get("residual")
+        if residual is not None:
+            return residual
+    tensors = getattr(execute_model_state, "tensors", None)
+    if isinstance(tensors, dict):
+        residual = tensors.get("residual")
+        if residual is not None:
+            return residual
+    return None
+
+
 class VLLMExecutor(BaseExecutor):
     def __init__(
         self,
@@ -235,6 +254,9 @@ class VLLMExecutor(BaseExecutor):
                 if hasattr(req, "hidden_states") and req.hidden_states is not None:
                     if hasattr(req.hidden_states, "to"):  # PyTorch tensor
                         req.hidden_states = req.hidden_states.to(self.device)
+                if hasattr(req, "residual_states") and req.residual_states is not None:
+                    if hasattr(req.residual_states, "to"):  # PyTorch tensor
+                        req.residual_states = req.residual_states.to(self.device)
         if len(requests) > 0:
             logger.debug(f"Handling {len(requests)} requests.")
 
@@ -389,10 +411,40 @@ class VLLMExecutor(BaseExecutor):
                     if token_probs is not None:
                         token_probs = [token_probs[i] for i in order]
 
+            try:
+                sampled_ids_for_log = (
+                    sampled_token_ids_cpu.tolist()
+                    if isinstance(sampled_token_ids_cpu, torch.Tensor)
+                    else sampled_token_ids_cpu
+                )
+            except Exception:
+                sampled_ids_for_log = sampled_token_ids_cpu
+            logger.debug(
+                "vLLM decode output: req_ids=%s sampled_token_ids=%s logits_shape=%s",
+                [req.request_id for req in requests],
+                sampled_ids_for_log,
+                tuple(logits.shape) if isinstance(logits, torch.Tensor) else None,
+            )
             return {"hidden_states": sampled_token_ids_cpu, "probs": token_probs}
         else:
             # Intermediate peer: return hidden states for next peer
-            return {"hidden_states": _extract_vllm_hidden_states(execute_model_state), "probs": None}
+            forwarded_hidden_states = _extract_vllm_hidden_states(execute_model_state)
+            forwarded_residual_states = _extract_vllm_residual_states(execute_model_state)
+            logger.debug(
+                "vLLM intermediate output: req_ids=%s hidden_shape=%s residual_shape=%s",
+                [req.request_id for req in requests],
+                tuple(forwarded_hidden_states.shape)
+                if isinstance(forwarded_hidden_states, torch.Tensor)
+                else None,
+                tuple(forwarded_residual_states.shape)
+                if isinstance(forwarded_residual_states, torch.Tensor)
+                else None,
+            )
+            return {
+                "hidden_states": forwarded_hidden_states,
+                "residual_states": forwarded_residual_states,
+                "probs": None,
+            }
 
     def _release_request(self, rid: str):
         """Release per-request resources in vLLM."""
@@ -467,6 +519,8 @@ class VLLMExecutor(BaseExecutor):
             # Concatenate hidden states from all requests
             # For vLLM, we need to flatten to (total_tokens, hidden_size)
             hidden_states_list = []
+            residual_states_list = []
+            has_residual_states = False
             for req in batched_requests:
                 hs = req.hidden_states
                 if hs.ndim == 2:
@@ -479,14 +533,36 @@ class VLLMExecutor(BaseExecutor):
                     # (hidden_size,) -> (1, hidden_size)
                     hidden_states_list.append(hs.unsqueeze(0))
 
+                rs = req.residual_states
+                if rs is not None:
+                    has_residual_states = True
+                    if rs.ndim == 2:
+                        residual_states_list.append(rs)
+                    elif rs.ndim == 3:
+                        residual_states_list.append(rs.squeeze(0))
+                    else:
+                        residual_states_list.append(rs.unsqueeze(0))
+                else:
+                    residual_states_list.append(torch.zeros_like(hidden_states_list[-1]))
+
             # Concatenate along sequence dimension to get (total_tokens, hidden_size)
             hidden_states = torch.cat(hidden_states_list, dim=0)
 
-            # Create residual tensor with same shape
-            residual = torch.zeros(
-                hidden_states.shape, dtype=hidden_states.dtype, device=hidden_states.device
-            )
+            if has_residual_states:
+                residual = torch.cat(residual_states_list, dim=0)
+            else:
+                residual = torch.zeros(
+                    hidden_states.shape, dtype=hidden_states.dtype, device=hidden_states.device
+                )
 
+            logger.debug(
+                "Prepared vLLM prefill PP tensors: req_ids=%s hidden_shape=%s residual_shape=%s "
+                "residual_present=%s",
+                [req.request_id for req in batched_requests],
+                tuple(hidden_states.shape),
+                tuple(residual.shape),
+                has_residual_states,
+            )
             pp_proxy_tensors = IntermediateTensors(
                 {
                     "hidden_states": hidden_states,
@@ -646,6 +722,8 @@ class VLLMExecutor(BaseExecutor):
             # Concatenate hidden states from all requests
             # For vLLM, we need to flatten to (total_tokens, hidden_size)
             hidden_states_list = []
+            residual_states_list = []
+            has_residual_states = False
             for req in batched_requests:
                 hs = req.hidden_states
                 if hs.ndim == 2:
@@ -658,14 +736,37 @@ class VLLMExecutor(BaseExecutor):
                     # (hidden_size,) -> (1, hidden_size)
                     hidden_states_list.append(hs.unsqueeze(0))
 
+                rs = req.residual_states
+                if rs is not None:
+                    has_residual_states = True
+                    if rs.ndim == 2:
+                        residual_states_list.append(rs)
+                    elif rs.ndim == 3:
+                        residual_states_list.append(rs.squeeze(0))
+                    else:
+                        residual_states_list.append(rs.unsqueeze(0))
+                else:
+                    residual_states_list.append(torch.zeros_like(hidden_states_list[-1]))
+
             # Concatenate along sequence dimension to get (total_tokens, hidden_size)
             hidden_states = torch.cat(hidden_states_list, dim=0)
 
-            # Create residual tensor with same shape
-            residual = torch.zeros(
-                hidden_states.shape, dtype=hidden_states.dtype, device=hidden_states.device
-            )
+            if has_residual_states:
+                residual = torch.cat(residual_states_list, dim=0)
+            else:
+                residual = torch.zeros(
+                    hidden_states.shape, dtype=hidden_states.dtype, device=hidden_states.device
+                )
 
+            logger.debug(
+                "Prepared vLLM decode PP tensors: req_ids=%s hidden_shape=%s residual_shape=%s "
+                "residual_present=%s current_positions=%s",
+                [req.request_id for req in batched_requests],
+                tuple(hidden_states.shape),
+                tuple(residual.shape),
+                has_residual_states,
+                [req.total_length for req in batched_requests],
+            )
             pp_proxy_tensors = IntermediateTensors(
                 {
                     "hidden_states": hidden_states,
