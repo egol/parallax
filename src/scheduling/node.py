@@ -464,7 +464,7 @@ class Node:
 
     def remove_request(self):
         """Remove a request from this node."""
-        self.current_requests -= 1
+        self.current_requests = max(0, self.current_requests - 1)
 
     def clear_serving_state(self) -> None:
         """Clear serving/runtime state for this node.

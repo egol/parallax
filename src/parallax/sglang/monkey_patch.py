@@ -23,6 +23,12 @@ def apply_parallax_sglang_monkey_patch():
 
     apply_weight_loader_filter_patch()
 
+    from parallax.sglang.monkey_patch_utils.qwen2_model import (
+        apply_qwen2_monkey_patch,
+    )
+
+    apply_qwen2_monkey_patch()
+
     from parallax.sglang.monkey_patch_utils.qwen3_next_config import (
         apply_qwen3_next_config_monkey_patch,
     )

@@ -1249,6 +1249,44 @@ class SchedulerManage:
             expanded.append(scheduler_peer_id)
         return expanded
 
+    def release_routing_table(self, routing_table: Optional[List[str]]) -> None:
+        """Release scheduler-side request accounting for a routed request."""
+        if self.scheduler is None or not routing_table:
+            return
+
+        scheduler_peer_id = self.get_peer_id()
+        release_path: List[str] = []
+        for node_id in routing_table:
+            if scheduler_peer_id and node_id == scheduler_peer_id:
+                continue
+            if self.scheduler.get_node(node_id) is None:
+                continue
+            release_path.append(node_id)
+
+        if release_path:
+            self.scheduler.release_request(release_path)
+
+    def touch_routing_table(self, routing_table: Optional[List[str]]) -> None:
+        """Refresh heartbeat timestamps for worker nodes participating in a routed request."""
+        if self.scheduler is None or not routing_table:
+            return
+
+        scheduler_peer_id = self.get_peer_id()
+        touch_path: List[str] = []
+        seen: Set[str] = set()
+        for node_id in routing_table:
+            if scheduler_peer_id and node_id == scheduler_peer_id:
+                continue
+            if node_id in seen:
+                continue
+            if self.scheduler.get_node(node_id) is None:
+                continue
+            seen.add(node_id)
+            touch_path.append(node_id)
+
+        if touch_path:
+            self.scheduler.touch_nodes(touch_path)
+
     def get_schedule_status(self):
         """
         Return whether the scheduler can route requests right now.

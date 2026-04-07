@@ -7,7 +7,8 @@ For MAC, test 1 pipeline
 """
 
 import pytest
-from mlx_lm.generate import generate
+import mlx.core as mx
+from mlx_lm.generate import generate_step
 from mlx_lm.utils import _download, load_model
 
 from parallax.p2p.message_util import proto_to_request, request_to_proto
@@ -234,19 +235,21 @@ def test_decode_pipeline_multiple_steps(pipeline_devices, pp_end_layers, num_dec
                     temperature=1.0,  # Explicitly set for deterministic behavior
                     pad_token_id=ref_cuda_tokenizer.pad_token_id,
                 )
-            ref_output_text = ref_cuda_tokenizer.decode(outputs[0], skip_special_tokens=True)
-            # Remove the prompt from the output
-            ref_output_text = ref_output_text[len(prompt) :].strip()
+            generated_ids = outputs[0][inputs["input_ids"].shape[1] :].tolist()
+            ref_output_text = ref_cuda_tokenizer.decode(generated_ids, skip_special_tokens=True)
         else:
-            # Use MLX for MLX pipelines
+            # Use MLX token generation directly so the reference path preserves
+            # the same leading-token whitespace semantics as pipeline decoding.
             try:
-                ref_output_text = generate(
-                    ref_model,
-                    ref_tokenizer,
-                    prompt,
-                    max_tokens=total_tokens_to_generate,
-                    verbose=False,
-                )
+                generated_ids = [
+                    int(token)
+                    for token, _ in generate_step(
+                        mx.array(ref_tokenizer.encode(prompt)),
+                        ref_model,
+                        max_tokens=total_tokens_to_generate,
+                    )
+                ]
+                ref_output_text = ref_tokenizer.decode(generated_ids)
             except RuntimeError as e:
                 if "Compile::eval_cpu" in str(e) or "metal" in str(e).lower():
                     pytest.skip(
@@ -261,28 +264,21 @@ def test_decode_pipeline_multiple_steps(pipeline_devices, pp_end_layers, num_dec
             for gen_step_tokens in generated_tokens_pipeline
         ]
 
-        # Decode the token IDs into a string
+        # Decode the token IDs into a string.
         output_text = executor_peer1.tokenizer.decode(output_tokens_for_prompt)
         print(f"parallax test generation: {output_text}")
 
-        # Compare outputs (account for potential whitespace differences)
-        # Remove leading/trailing whitespace and compare first few characters
-        ref_clean = ref_output_text.strip()
-        output_clean = output_text.strip()
+        ref_clean = ref_output_text.rstrip()
+        output_clean = output_text.rstrip()
 
-        # For debugging: print both outputs
-        print(f"Reference output (clean): '{ref_clean[:20]}'")
-        print(f"Pipeline output (clean): '{output_clean[:20]}'")
+        print(f"Reference output (clean): '{ref_clean}'")
+        print(f"Pipeline output (clean): '{output_clean}'")
 
-        # Compare first 5 characters (allowing for minor differences)
-        # This is a lenient check - exact match may vary due to tokenization differences
-        assert len(ref_clean) > 0 and len(output_clean) > 0, "Both outputs should be non-empty"
-        # Check if they start with similar content (at least 3 characters match)
-        min_len = min(len(ref_clean), len(output_clean), 5)
-        if min_len >= 3:
-            assert (
-                ref_clean[:min_len].lower() == output_clean[:min_len].lower()
-            ), f"Output mismatch: ref='{ref_clean[:20]}' vs pipeline='{output_clean[:20]}'"
+        assert ref_clean, "Reference output should be non-empty"
+        assert output_clean, "Pipeline output should be non-empty"
+        assert (
+            ref_clean == output_clean
+        ), f"Output mismatch for prompt {prompt!r}: ref={ref_clean!r} vs pipeline={output_clean!r}"
 
     # 6. Release resources for next tests
     executor_peer1.shutdown()

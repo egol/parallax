@@ -34,9 +34,10 @@ PROMPT="${PARALLAX_NETTEST_PROMPT:-What color is the sky?}"
 PARALLAX_LOCALNET_READY_TIMEOUT="${PARALLAX_LOCALNET_READY_TIMEOUT:-300}"
 
 export PARALLAX_LOCALNET_TEST_MODE="${PARALLAX_LOCALNET_TEST_MODE:-0}"
+export PARALLAX_LOCALNET_INSTALL_SGLANG="${PARALLAX_LOCALNET_INSTALL_SGLANG:-1}"
 # Workers use the transformers runtime for real (CPU) inference
 export WORKER_ENV="PARALLAX_TEST_RUNTIME=transformers PARALLAX_TEST_OVERRIDE_MEMORY_GB=${PARALLAX_TEST_OVERRIDE_MEMORY_GB:-0.7}"
-WORKER_JOIN_ARGS="${WORKER_JOIN_ARGS:---kv-cache-memory-fraction 0.45 --max-total-tokens 4096 --max-sequence-length 1024 --max-batch-size 2 --max-num-tokens-per-batch 512}"
+WORKER_JOIN_ARGS="${WORKER_JOIN_ARGS:---kv-cache-memory-fraction 0.7 --max-total-tokens 4096 --max-sequence-length 1024 --max-batch-size 2 --max-num-tokens-per-batch 512}"
 
 source "$SCRIPT_DIR/lib_localnet.sh"
 source "$SCRIPT_DIR/lib_nettest.sh"
@@ -77,16 +78,22 @@ echo "=== Parallax nettest: benchmark (real model: $MODEL_PATH) ==="
 
 # Boot cluster — uses real model via WORKER_ENV
 boot_full_cluster
-echo "$(validate_split_topology "$PARALLAX_LOCALNET_INIT_NODES")"
+split_topology="$(validate_split_topology "$PARALLAX_LOCALNET_INIT_NODES")"
+echo "$split_topology"
 
 # Verify real model produces actual text
 echo "--- verifying real model output ---"
 chat_response="$(compose exec -T host python -c "import json,time,urllib.request,sys
 payload = json.dumps({
     'model': '$MODEL_PATH',
-    'messages': [{'role': 'user', 'content': 'Say hello.'}],
+    'messages': [{'role': 'user', 'content': 'Reply with exactly one token: OK'}],
     'stream': False,
-    'max_tokens': 12,
+    'max_tokens': 4,
+    'sampling_params': {
+        'temperature': 0.0,
+        'top_k': 1,
+        'top_p': 1.0,
+    },
 }).encode()
 request = urllib.request.Request(
     'http://127.0.0.1:3200/v1/chat/completions',
@@ -119,6 +126,9 @@ if not content:
     raise SystemExit("real-model response was empty")
 if "[parallax-test-mode:" in content:
     raise SystemExit("benchmark unexpectedly fell back to synthetic runtime")
+normalized = content.strip().strip(".!?,:;\"'").upper()
+if normalized != "OK":
+    raise SystemExit("benchmark sanity response was not coherent enough: " + content)
 print(f"model response: {content[:100]}")
 PY
 

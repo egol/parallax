@@ -17,6 +17,8 @@ Executor handles
 7. Get the hidden-states from the model execution.
 """
 
+import json
+import os
 import time
 from abc import abstractmethod
 from http import HTTPStatus
@@ -25,7 +27,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import zmq
 from jinja2 import TemplateError
 
-from parallax.utils.hf_compat import convert_chat, process_message_content
 from parallax.p2p.message_util import (
     abort_request_to_proto,
     proto_to_abort_request,
@@ -42,6 +43,7 @@ from parallax.server.request import (
 )
 from parallax.server.sampling.sampling_params import SamplingParams
 from parallax.server.scheduler import Scheduler
+from parallax.server.request_prep import build_prompt_input_ids
 from parallax.utils.shared_state import SharedState
 from parallax.utils.utils import get_current_device, get_device_dtype, get_zmq_socket
 from parallax_utils.logging_config import get_logger
@@ -130,6 +132,13 @@ class BaseExecutor:
         # Metrics throttling for per-layer latency updates
         self.layer_latency_update_every = int(max(1, layer_latency_update_every))
         self._decode_steps_since_metric = self.layer_latency_update_every
+        self._trace_requests_enabled = os.getenv(
+            "PARALLAX_TRACE_REQUESTS", ""
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._trace_requests_file = (
+            os.getenv("PARALLAX_TRACE_REQUESTS_FILE", "").strip()
+            or "/tmp/parallax-request-trace.jsonl"
+        )
 
         # TODO: Duplicate code to MLXExecutor.
         self.num_shard_layers = end_layer - start_layer
@@ -288,6 +297,51 @@ class BaseExecutor:
             logger.debug(f"Received {len(recv_reqs)} HTTP requests")
         return recv_reqs
 
+    def _trace_stage_role(self) -> str:
+        if self.is_first_peer and self.is_last_peer:
+            return "single"
+        if self.is_first_peer:
+            return "first"
+        if self.is_last_peer:
+            return "last"
+        return "middle"
+
+    def _trace_phase_for_request(
+        self, request: Request, batch_type: Optional[str] = None
+    ) -> str:
+        if batch_type == "prefill_batch":
+            return "prefill"
+        if batch_type == "decode_batch":
+            return "decode"
+        return "prefill" if request.is_prefill else "decode"
+
+    def _trace_requests(self, requests: List[Request], *, status: str, batch_type: Optional[str] = None):
+        if not self._trace_requests_enabled or self.tp_rank != 0 or not requests:
+            return
+
+        node_id = None
+        if self.shared_state is not None:
+            node_id = self.shared_state.get("node_id")
+
+        records = []
+        stage_role = self._trace_stage_role()
+        now = time.time()
+        for request in requests:
+            records.append(
+                {
+                    "ts": now,
+                    "request_id": request.request_id,
+                    "node_id": node_id,
+                    "stage_role": stage_role,
+                    "phase": self._trace_phase_for_request(request, batch_type=batch_type),
+                    "status": status,
+                }
+            )
+
+        with open(self._trace_requests_file, "a", encoding="utf-8") as fh:
+            for record in records:
+                fh.write(json.dumps(record, sort_keys=True) + "\n")
+
     def recv_requests_from_peer(self) -> Tuple[List[Request], str]:
         """Receives requests from the RPC server."""
         refit_weight_path = ""
@@ -317,6 +371,26 @@ class BaseExecutor:
                                             req.hidden_states = req.hidden_states.to(self.dtype)
                                         elif self.device == "mlx":
                                             req.hidden_states = req.hidden_states.astype(self.dtype)
+                                        else:
+                                            raise ValueError(
+                                                f"Unsupported device type: {self.device}"
+                                            )
+                                if getattr(req, "residual_states", None) is not None:
+                                    if req.residual_states.dtype != self.dtype:
+                                        logger.debug(
+                                            f"Converting residual_states dtype from {req.residual_states.dtype} to {self.dtype} for request {req.request_id}"
+                                        )
+                                        if self.device is not None and (
+                                            self.device.startswith("cuda")
+                                            or self.device == "cpu"
+                                        ):
+                                            req.residual_states = req.residual_states.to(
+                                                self.dtype
+                                            )
+                                        elif self.device == "mlx":
+                                            req.residual_states = req.residual_states.astype(
+                                                self.dtype
+                                            )
                                         else:
                                             raise ValueError(
                                                 f"Unsupported device type: {self.device}"
@@ -404,11 +478,12 @@ class BaseExecutor:
                 - 'probs': list of probabilities (last peer) or None (intermediate peer)
             context_lengths: Context lengths for each request
         """
-        # Extract hidden_states and probs from output (always a dict now)
+        # Extract hidden_states, optional residuals, and probs from output.
         assert isinstance(
             batch_output, dict
         ), f"Expected dict from process_batch, got {type(batch_output)}"
         hidden_states = batch_output["hidden_states"]
+        residual_states = batch_output.get("residual_states")
         token_probs = batch_output["probs"]
 
         batched_requests = []
@@ -435,6 +510,24 @@ class BaseExecutor:
                         hidden_state_for_req = hidden_states[pre_length : pre_length + 1, :]
                     pre_length += 1
 
+            residual_state_for_req = None
+            if residual_states is not None:
+                if self.is_last_peer:
+                    residual_state_for_req = None
+                elif src_request.is_prefill:
+                    true_length = int(context_lengths[i])
+                    if residual_states.ndim == 3:
+                        residual_state_for_req = residual_states[i, :true_length, :]
+                    else:
+                        residual_state_for_req = residual_states[
+                            pre_length - true_length : pre_length, :
+                        ]
+                else:
+                    if residual_states.ndim == 3:
+                        residual_state_for_req = residual_states[i, :, :]
+                    else:
+                        residual_state_for_req = residual_states[pre_length - 1 : pre_length, :]
+
             # Get prob for this request if available
             token_prob = (
                 token_probs[i]
@@ -443,7 +536,10 @@ class BaseExecutor:
             )
 
             next_req = self._prepare_next_single_request(
-                src_request, hidden_state_for_req, token_prob
+                src_request,
+                hidden_state_for_req,
+                token_prob=token_prob,
+                residual_states=residual_state_for_req,
             )
             batched_requests.append(next_req)
 
@@ -480,6 +576,7 @@ class BaseExecutor:
                 self.check_and_refit_weight(refit_weight_path)
 
             self.handle_input_requests(received_requests)
+            self._trace_requests(received_requests, status="received")
             # Send abort signals to P2P server to broadcast to all nodes
             if len(self.finished_batch) > 0 and self.tp_rank == 0:
                 self.send_to_peer_socket.send_multipart(
@@ -536,6 +633,11 @@ class BaseExecutor:
                         output = self.process_batch(
                             prepared_inputs, return_decoded_tokens=self.is_last_peer
                         )
+                        self._trace_requests(
+                            prepared_inputs["requests"],
+                            status="processed",
+                            batch_type=batch_type,
+                        )
                         # Update metrics with per-layer latency sample (throttled by decode steps)
                         if batch_type == "decode_batch":
                             try:
@@ -559,6 +661,11 @@ class BaseExecutor:
                             requests=prepared_inputs["requests"],
                             batch_output=output,
                             context_lengths=prepared_inputs.get("context_lengths"),
+                        )
+                        self._trace_requests(
+                            next_batch,
+                            status="forwarded",
+                            batch_type=batch_type,
                         )
 
                         # 8. Dispatch to the appropriate destination
@@ -623,24 +730,7 @@ class BaseExecutor:
         assert "messages" in raw_request, "Request did not contain messages"
 
         rid = raw_request["rid"]
-        if self.tokenizer.chat_template:
-            messages = raw_request["messages"]
-            process_message_content(messages)
-            chat_template_kwargs = raw_request.get("chat_template_kwargs", {})
-            # check extra_body for backward compatibility
-            if "extra_body" in raw_request and "chat_template_kwargs" in raw_request["extra_body"]:
-                chat_template_kwargs.update(raw_request["extra_body"]["chat_template_kwargs"])
-
-            prompt = self.tokenizer.apply_chat_template(
-                messages,
-                raw_request.get("tools") or None,
-                tokenize=True,
-                add_generation_prompt=True,
-                **chat_template_kwargs,
-            )
-        else:
-            prompt = convert_chat(raw_request["messages"], raw_request.get("role_mapping"))
-            prompt = self.tokenizer.encode(prompt)
+        prompt = build_prompt_input_ids(self.tokenizer, raw_request)
 
         max_seq_len = self.max_sequence_length if self.max_sequence_length is not None else 4096
         max_seq_len = max(max_seq_len, 4096)
@@ -726,7 +816,11 @@ class BaseExecutor:
             logger.debug("Failed to send error notification to HTTP handler", exc_info=True)
 
     def _prepare_next_single_request(
-        self, request: Request, hidden_states: Any, token_prob: Optional[float] = None
+        self,
+        request: Request,
+        hidden_states: Any,
+        token_prob: Optional[float] = None,
+        residual_states: Optional[Any] = None,
     ) -> Request:
         """Handle request state changes both inter and intra peers.
 
@@ -754,6 +848,7 @@ class BaseExecutor:
                 current_position=request.total_length + 1,
                 input_ids=request.input_ids,
                 hidden_states=hidden_states,
+                residual_states=None,
                 next_token_id=next_token_id,
                 routing_table=request.routing_table,
                 lora_path=request.lora_path,
@@ -773,6 +868,7 @@ class BaseExecutor:
                 current_position=request.total_length,
                 input_ids=request.input_ids,
                 hidden_states=hidden_states,
+                residual_states=None,
                 next_token_id=next_token_id,
                 routing_table=request.routing_table,
                 lora_path=request.lora_path,
@@ -784,11 +880,17 @@ class BaseExecutor:
             if request.is_finished:
                 hidden_states = None
             return IntermediateRequest.from_initial_request(
-                request, hidden_states=hidden_states, lora_path=request.lora_path
+                request,
+                hidden_states=hidden_states,
+                residual_states=residual_states,
+                lora_path=request.lora_path,
             )
         assert isinstance(
             request, IntermediateRequest
         ), "Intermediate peer must process an IntermediateRequest."
         return IntermediateRequest.from_intermediate_request(
-            request, hidden_states, lora_path=request.lora_path
+            request,
+            hidden_states,
+            new_residual_states=residual_states,
+            lora_path=request.lora_path,
         )

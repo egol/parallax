@@ -494,6 +494,23 @@ class Scheduler:
         )
         return req.request_id, path, latency
 
+    def release_request(self, path: List[str]) -> None:
+        """Release per-node load counters for a previously dispatched request path."""
+        for node_id in path:
+            try:
+                self.node_manager.remove_request(node_id)
+            except Exception:
+                logger.debug("Failed to release request load for node %s", node_id, exc_info=True)
+
+    def touch_nodes(self, node_ids: List[str]) -> None:
+        """Refresh heartbeat timestamps for known nodes without mutating routing metadata."""
+        now = time.time()
+        for node_id in node_ids:
+            node = self.node_manager.get(node_id)
+            if node is None:
+                continue
+            node.last_heartbeat = now
+
     def emit_alloc_log_snapshot(self, *, reason: Optional[str] = None) -> str:
         """Update `self.alloc_log_snapshot` and emit it.
 

@@ -60,6 +60,15 @@ class RPCConnectionHandler(ConnectionHandler):
     def _get_transformer_stub(self, peer_id: str) -> ServiceStub:
         return ServiceStub(self, peer_id, "TransformerConnectionHandler")
 
+    def _touch_request_routes(self, requests) -> None:
+        if self.scheduler_manage is None:
+            return
+        for req in requests:
+            try:
+                self.scheduler_manage.touch_routing_table(list(req.routing_table))
+            except Exception:
+                logger.debug("Failed to touch routing table for %s", req.rid, exc_info=True)
+
     @rpc_stream
     def rpc_pp_forward(
         self,
@@ -67,6 +76,7 @@ class RPCConnectionHandler(ConnectionHandler):
     ) -> forward_pb2.ForwardResponse:
         """Scheduler-host proxy hop for centralized worker routing."""
         try:
+            self._touch_request_routes(request.reqs)
             grouped_requests = self._group_requests_by_next_peer(request.reqs)
             for next_peer_id, requests in grouped_requests.items():
                 stub = self._get_transformer_stub(next_peer_id)
@@ -86,6 +96,7 @@ class RPCConnectionHandler(ConnectionHandler):
         request: forward_pb2.AbortRequest,
     ) -> forward_pb2.AbortResponse:
         try:
+            self._touch_request_routes(request.reqs)
             grouped_requests = {}
             self_peer_id = self.lattica.peer_id()
             for req in request.reqs:
@@ -98,9 +109,10 @@ class RPCConnectionHandler(ConnectionHandler):
                 stub = self._get_transformer_stub(peer_id)
                 new_abort_request = forward_pb2.AbortRequest()
                 new_abort_request.reqs.extend(requests)
-                response = stub.rpc_abort(new_abort_request)
-                if hasattr(response, "result"):
-                    response.result()
+                # Abort fanout is best-effort. Waiting for downstream abort
+                # acknowledgements can deadlock centralized routing when the
+                # origin worker is still inside its upstream abort path.
+                stub.rpc_abort(new_abort_request)
         except Exception as e:
             logger.exception(f"Error in rpc_abort: {e}")
         return forward_pb2.AbortResponse()
@@ -237,16 +249,26 @@ class RPCConnectionHandler(ConnectionHandler):
                     response.raise_for_status()
                     yield response.content
         except httpx.HTTPStatusError as e:
+            status_code = getattr(e.response, "status_code", 500)
             detail = e.response.text[:1000] if e.response is not None else ""
             logger.exception(
                 "Error in chat completion upstream response "
-                f"(status={getattr(e.response, 'status_code', 'unknown')}, "
+                f"(status={status_code}, "
                 f"body={detail!r})"
             )
-            yield f"upstream http error: {detail}".encode()
+            if detail:
+                try:
+                    payload = json.loads(detail)
+                except Exception:
+                    payload = {"error": detail}
+            else:
+                payload = {"error": "upstream http error"}
+            if isinstance(payload, dict) and "status_code" not in payload:
+                payload["status_code"] = int(status_code)
+            yield json.dumps(payload).encode()
         except Exception as e:
             logger.exception(f"Error in chat completion: {e}")
-            yield b"internal server error"
+            yield json.dumps({"error": "internal server error", "status_code": 500}).encode()
 
     @rpc_stream_iter
     def cluster_status(self):

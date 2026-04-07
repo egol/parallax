@@ -15,6 +15,8 @@
 : "${PARALLAX_LOCALNET_WORKER_COUNT:=3}"
 : "${PARALLAX_LOCALNET_INIT_NODES:=${PARALLAX_LOCALNET_WORKER_COUNT}}"
 : "${PARALLAX_LOCALNET_READY_TIMEOUT:=60}"
+: "${PARALLAX_LOCALNET_NETWORK_MODE:=centralized}"
+: "${PARALLAX_TRACE_FILE:=/tmp/parallax-request-trace.jsonl}"
 
 readonly WORKER_SERVICES=(worker1 worker2 worker3)
 
@@ -45,6 +47,9 @@ dump_artifacts() {
   mkdir -p "$dir"
   compose ps >"$dir/compose-ps.txt" 2>&1 || true
   compose logs host >"$dir/host.log" 2>&1 || true
+  for container in host "${WORKER_SERVICES[@]}"; do
+    compose exec -T "$container" sh -lc "iptables -S" >"$dir/${container}-iptables.txt" 2>&1 || true
+  done
   for worker in "${WORKER_SERVICES[@]}"; do
     compose logs "$worker" >"$dir/${worker}.log" 2>&1 || true
   done
@@ -52,6 +57,7 @@ dump_artifacts() {
   compose exec -T host sh -lc "cat $CHAT_LOG" >"$dir/chat.log" 2>&1 || true
   for worker in "${WORKER_SERVICES[@]}"; do
     compose exec -T "$worker" sh -lc "cat /tmp/parallax-join.log" >"$dir/${worker}-join.log" 2>&1 || true
+    compose exec -T "$worker" sh -lc "cat $PARALLAX_TRACE_FILE" >"$dir/${worker}-request-trace.jsonl" 2>&1 || true
   done
   compose exec -T host curl -sS http://127.0.0.1:3301/cluster/status_json >"$dir/cluster-status.json" 2>&1 || true
 }
@@ -109,7 +115,8 @@ start_worker_join() {
   local tcp_port="$3"
   local udp_port="$4"
   local scheduler_addr="$5"
-  local service_key="${service^^}"
+  local service_key
+  service_key="$(printf '%s' "$service" | tr '[:lower:]' '[:upper:]')"
   local service_env_var="${service_key}_ENV"
   local service_join_args_var="${service_key}_JOIN_ARGS"
   local env_prefix="${!service_env_var:-${WORKER_ENV:-}}"
@@ -123,6 +130,20 @@ start_all_workers() {
   for worker in "${WORKER_SERVICES[@]}"; do
     start_worker_join "$worker" "$((3100 + index))" "$((4100 + index))" "$((5100 + index))" "$scheduler_addr"
     index=$((index + 1))
+  done
+}
+
+clear_worker_request_traces() {
+  for worker in "${WORKER_SERVICES[@]}"; do
+    compose exec -T "$worker" sh -lc "rm -f $PARALLAX_TRACE_FILE" >/dev/null 2>&1 || true
+  done
+}
+
+collect_worker_request_traces() {
+  local dir="$1"
+  mkdir -p "$dir"
+  for worker in "${WORKER_SERVICES[@]}"; do
+    compose exec -T "$worker" sh -lc "cat $PARALLAX_TRACE_FILE" >"$dir/${worker}.jsonl" 2>&1 || true
   done
 }
 
@@ -251,7 +272,7 @@ start_scheduler() {
 
   compose exec -T host curl -sS -X POST http://127.0.0.1:3301/scheduler/bootstrap \
     -H 'Content-Type: application/json' \
-    -d '{"is_local_network":true}' >/dev/null
+    -d "{\"network_mode\":\"$PARALLAX_LOCALNET_NETWORK_MODE\"}" >/dev/null
 
   scheduler_peer_id="$(compose exec -T host sh -lc "grep -m1 'Stored scheduler peer id:' $SCHEDULER_LOG | awk '{print \$NF}'")"
   if [[ -z "$scheduler_peer_id" ]]; then
@@ -270,7 +291,7 @@ init_model() {
   local init_nodes="${1:-$PARALLAX_LOCALNET_INIT_NODES}"
   compose exec -T host curl -sS -X POST http://127.0.0.1:3301/scheduler/init \
     -H 'Content-Type: application/json' \
-    -d "{\"model_name\":\"$MODEL_PATH\",\"init_nodes_num\":$init_nodes,\"is_local_network\":true}" >/dev/null
+    -d "{\"model_name\":\"$MODEL_PATH\",\"init_nodes_num\":$init_nodes,\"network_mode\":\"$PARALLAX_LOCALNET_NETWORK_MODE\"}" >/dev/null
 
   wait_status "data.get('initialized') is True" 60 >/dev/null
   wait_status "data.get('status') == 'available' and data.get('topology', {}).get('totals', {}).get('ready_pipelines', 0) >= 1" "$PARALLAX_LOCALNET_READY_TIMEOUT" >/dev/null

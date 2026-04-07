@@ -408,9 +408,11 @@ class HTTPHandler:
                 or recv_dict.get("abort", False)
             )
 
-            # Only process and send non-EOS tokens
-            if not is_finished and len(output) > 0:
-                # Accumulate full text for non-streaming and potentially for logging
+            # Preserve the final emitted text segment for length/eos finishes.
+            # Aborts should not surface partial output from a cancelled step.
+            should_emit_output = not recv_dict.get("abort", False)
+            if should_emit_output and len(output) > 0:
+                # Accumulate full text for non-streaming and potentially for logging.
                 request_info.text += output
 
                 # For streaming, put the individual token into the queue.

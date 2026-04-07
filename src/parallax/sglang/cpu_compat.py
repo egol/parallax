@@ -11,6 +11,7 @@ to import and run its native CPU fallback path.
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import types
 from typing import Optional, Tuple, Union
@@ -306,6 +307,46 @@ def _patch_cpu_paged_allocator() -> None:
     PagedTokenToKVPoolAllocator._parallax_cpu_patched = True
 
 
+def _parse_lscpu_topology_with_blank_numa_fallback(output: str) -> list[tuple[int, int, int, int]]:
+    cpu_info: list[tuple[int, int, int, int]] = []
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) != 4:
+            raise RuntimeError(f"Unexpected lscpu topology line: {raw_line!r}")
+        cpu_str, core_str, socket_str, node_str = parts
+        if not cpu_str or not core_str:
+            raise RuntimeError(f"Incomplete lscpu topology line: {raw_line!r}")
+        if not socket_str:
+            socket_str = "0"
+        if not node_str:
+            # Docker on macOS/WSL commonly leaves NUMA blank for a single-node CPU topology.
+            node_str = socket_str or "0"
+        cpu_info.append((int(cpu_str), int(core_str), int(socket_str), int(node_str)))
+    return cpu_info
+
+
+def _patch_cpu_lscpu_topology() -> None:
+    from sglang.srt.utils import common as sgl_common
+
+    if getattr(sgl_common, "_parallax_cpu_topology_patched", False):
+        return
+
+    def _parse_lscpu_topology():
+        try:
+            output = subprocess.check_output(
+                ["lscpu", "-p=CPU,Core,Socket,Node"], text=True
+            )
+        except Exception as exc:  # pragma: no cover - mirrors upstream error path
+            raise RuntimeError(f"Unexpected error running 'lscpu': {exc}") from exc
+        return _parse_lscpu_topology_with_blank_numa_fallback(output)
+
+    sgl_common.parse_lscpu_topology = _parse_lscpu_topology
+    sgl_common._parallax_cpu_topology_patched = True
+
+
 def install_cpu_import_shims() -> None:
     if not _cpu_engine_requested():
         return
@@ -331,6 +372,7 @@ def install_cpu_import_shims() -> None:
     model_executor_module.layers = layers_module
     layers_module.activation = activation_module
     layers_module.layernorm = layernorm_module
+    _patch_cpu_lscpu_topology()
     _patch_cpu_paged_allocator()
 
     install_cpu_import_shims._installed = True

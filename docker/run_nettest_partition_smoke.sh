@@ -29,7 +29,8 @@ trap 'on_exit $?' EXIT
 echo "=== Parallax nettest: partition smoke ==="
 
 boot_full_cluster
-echo "$(validate_split_topology "$PARALLAX_LOCALNET_INIT_NODES")"
+split_topology="$(validate_split_topology "$PARALLAX_LOCALNET_INIT_NODES")"
+echo "$split_topology"
 
 # Baseline chat
 echo "--- baseline chat ---"
@@ -49,7 +50,8 @@ sleep 2
 start_worker_join worker1 3101 4101 5101 "$scheduler_addr"
 wait_status "data.get('topology', {}).get('totals', {}).get('registered_workers', 0) >= 3" 120 >/dev/null
 wait_status "data.get('status') == 'available' and data.get('topology', {}).get('totals', {}).get('ready_pipelines', 0) >= 1" 120 >/dev/null
-echo "$(validate_split_topology "$PARALLAX_LOCALNET_INIT_NODES")"
+split_topology="$(validate_split_topology "$PARALLAX_LOCALNET_INIT_NODES")"
+echo "$split_topology"
 
 echo "--- phase 1 recovery verified ---"
 recovered="$(request_synthetic_chat)"

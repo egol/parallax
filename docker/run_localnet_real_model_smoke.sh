@@ -13,8 +13,9 @@ SCHEDULER_LOG="/tmp/parallax-run.log"
 CHAT_LOG="/tmp/parallax-chat.log"
 
 export PARALLAX_LOCALNET_TEST_MODE="${PARALLAX_LOCALNET_TEST_MODE:-0}"
+export PARALLAX_LOCALNET_INSTALL_SGLANG="${PARALLAX_LOCALNET_INSTALL_SGLANG:-1}"
 WORKER_ENV="PARALLAX_TEST_RUNTIME=transformers PARALLAX_TEST_OVERRIDE_MEMORY_GB=${PARALLAX_TEST_OVERRIDE_MEMORY_GB:-0.7}"
-WORKER_JOIN_ARGS="${WORKER_JOIN_ARGS:---kv-cache-memory-fraction 0.45 --max-total-tokens 4096 --max-sequence-length 1024 --max-batch-size 2 --max-num-tokens-per-batch 512}"
+WORKER_JOIN_ARGS="${WORKER_JOIN_ARGS:---kv-cache-memory-fraction 0.7 --max-total-tokens 4096 --max-sequence-length 1024 --max-batch-size 2 --max-num-tokens-per-batch 512}"
 
 source "$SCRIPT_DIR/lib_localnet.sh"
 
@@ -34,9 +35,14 @@ echo "$split_proof"
 chat_response="$(compose exec -T host python -c "import json,time,urllib.request,sys
 payload = json.dumps({
     'model': '$MODEL_PATH',
-    'messages': [{'role': 'user', 'content': 'Say the word compose exactly once.'}],
+    'messages': [{'role': 'user', 'content': 'Reply with exactly one token: OK'}],
     'stream': False,
-    'max_tokens': 12,
+    'max_tokens': 4,
+    'sampling_params': {
+        'temperature': 0.0,
+        'top_k': 1,
+        'top_p': 1.0,
+    },
 }).encode()
 request = urllib.request.Request(
     'http://127.0.0.1:3200/v1/chat/completions',
@@ -71,6 +77,9 @@ if not content:
     raise SystemExit("actual-model response was empty")
 if "[parallax-test-mode:" in content:
     raise SystemExit("actual-model smoke unexpectedly fell back to synthetic runtime")
+normalized = content.strip().strip(".!?,:;\"'").upper()
+if normalized != "OK":
+    raise SystemExit("actual-model response was not coherent enough: " + content)
 print(json.dumps(payload))
 PY
 

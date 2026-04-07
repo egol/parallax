@@ -113,7 +113,7 @@ def test_vllm_model_runner_non_decoding_returns_stable_tuple(monkeypatch):
     runner.is_first_peer = True
     runner.intermediate_tensors = None
     runner.execute_model_state = None
-    returned_state = types.SimpleNamespace(hidden_states="hs")
+    returned_state = {"hidden_states": "hs", "residual": "r"}
 
     execute_calls = []
     sample_calls = []
@@ -139,7 +139,7 @@ def test_vllm_model_runner_non_decoding_returns_stable_tuple(monkeypatch):
     )
 
     assert result == (returned_state, None, None, None, None)
-    assert runner.execute_model_state is returned_state
+    assert runner.execute_model_state is None
     assert execute_calls == [("scheduler-output", "proxy")]
     assert sample_calls == []
 
@@ -167,7 +167,8 @@ def test_vllm_model_runner_non_decoding_supports_legacy_in_place_state(monkeypat
         return_decoded_tokens=False,
     )
 
-    assert result == (runner.execute_model_state, None, None, None, None)
+    assert result == (types.SimpleNamespace(hidden_states="legacy-hs"), None, None, None, None)
+    assert runner.execute_model_state is None
 
 
 def test_vllm_model_runner_raises_when_execution_state_is_missing(monkeypatch):
@@ -189,9 +190,154 @@ def test_vllm_model_runner_raises_when_execution_state_is_missing(monkeypatch):
             return_decoded_tokens=False,
         )
     except RuntimeError as exc:
-        assert "returned no execution state" in str(exc)
+        assert "returned no intermediate tensors" in str(exc)
     else:
         raise AssertionError("Expected execute_model to fail when vLLM returns no state")
+
+
+def test_vllm_model_runner_decoding_samples_when_execute_model_returns_none(monkeypatch):
+    runner = ParallaxVLLMModelRunner.__new__(ParallaxVLLMModelRunner)
+    runner.is_first_peer = True
+    runner.intermediate_tensors = None
+    runner.execute_model_state = types.SimpleNamespace(logits="legacy-logits")
+
+    sample_output = types.SimpleNamespace(
+        _sampled_token_ids=torch.tensor([[7], [9]], dtype=torch.long),
+        sampled_token_ids_cpu=torch.tensor([7, 9], dtype=torch.long),
+    )
+    sample_calls = []
+
+    monkeypatch.setattr(
+        model_runner_module.GPUModelRunner,
+        "execute_model",
+        lambda self, scheduler_output, intermediate_tensors: None,
+    )
+    def _sample_tokens(self, grammar_output=None):
+        sample_calls.append(grammar_output)
+        self.execute_model_state = None
+        return sample_output
+
+    monkeypatch.setattr(
+        model_runner_module.GPUModelRunner,
+        "sample_tokens",
+        _sample_tokens,
+    )
+
+    result = runner.execute_model(
+        scheduler_output="scheduler-output",
+        intermediate_tensors="proxy",
+        return_decoded_tokens=True,
+    )
+
+    assert result[0] is sample_output
+    assert torch.equal(result[1], torch.tensor([[7], [9]], dtype=torch.long))
+    assert torch.equal(result[2], torch.tensor([7, 9], dtype=torch.long))
+    assert result[3] is sample_output
+    assert result[4] == "legacy-logits"
+    assert sample_calls == [None]
+    assert runner.execute_model_state is None
+
+
+def test_vllm_model_runner_decoding_uses_direct_output_without_sampling(monkeypatch):
+    runner = ParallaxVLLMModelRunner.__new__(ParallaxVLLMModelRunner)
+    runner.is_first_peer = True
+    runner.intermediate_tensors = None
+    runner.execute_model_state = None
+    sample_calls = []
+    direct_output = types.SimpleNamespace(sampled_token_ids=[[3], [4]], logits="direct-logits")
+
+    monkeypatch.setattr(
+        model_runner_module.GPUModelRunner,
+        "execute_model",
+        lambda self, scheduler_output, intermediate_tensors: direct_output,
+    )
+    monkeypatch.setattr(
+        model_runner_module.GPUModelRunner,
+        "sample_tokens",
+        lambda self, grammar_output=None: sample_calls.append(grammar_output),
+    )
+
+    result = runner.execute_model(
+        scheduler_output="scheduler-output",
+        intermediate_tensors="proxy",
+        return_decoded_tokens=True,
+    )
+
+    assert result[0] is direct_output
+    assert result[1] == [[3], [4]]
+    assert torch.equal(result[2], torch.tensor([3, 4], dtype=torch.long))
+    assert result[3] is direct_output
+    assert result[4] == "direct-logits"
+    assert sample_calls == []
+    assert runner.execute_model_state is None
+
+
+def test_vllm_model_runner_decoding_resolves_async_output_once(monkeypatch):
+    runner = ParallaxVLLMModelRunner.__new__(ParallaxVLLMModelRunner)
+    runner.is_first_peer = True
+    runner.intermediate_tensors = None
+    runner.execute_model_state = None
+
+    direct_output = types.SimpleNamespace(sampled_token_ids=[[11]], logits="async-logits")
+
+    class AsyncOutput:
+        def __init__(self):
+            self.calls = 0
+
+        def get_output(self):
+            self.calls += 1
+            return direct_output
+
+    async_output = AsyncOutput()
+    sample_calls = []
+
+    monkeypatch.setattr(
+        model_runner_module.GPUModelRunner,
+        "execute_model",
+        lambda self, scheduler_output, intermediate_tensors: async_output,
+    )
+    monkeypatch.setattr(
+        model_runner_module.GPUModelRunner,
+        "sample_tokens",
+        lambda self, grammar_output=None: sample_calls.append(grammar_output),
+    )
+
+    result = runner.execute_model(
+        scheduler_output="scheduler-output",
+        intermediate_tensors="proxy",
+        return_decoded_tokens=True,
+    )
+
+    assert result[0] is direct_output
+    assert result[1] == [[11]]
+    assert torch.equal(result[2], torch.tensor([11], dtype=torch.long))
+    assert result[3] is async_output
+    assert result[4] == "async-logits"
+    assert async_output.calls == 1
+    assert sample_calls == []
+    assert runner.execute_model_state is None
+
+
+def test_vllm_model_runner_non_decoding_clears_pending_state_when_execute_returns_none(monkeypatch):
+    runner = ParallaxVLLMModelRunner.__new__(ParallaxVLLMModelRunner)
+    runner.is_first_peer = False
+    runner.intermediate_tensors = "existing-buffer"
+    runner.execute_model_state = types.SimpleNamespace(hidden_states="broadcast-hidden")
+
+    monkeypatch.setattr(
+        model_runner_module.GPUModelRunner,
+        "execute_model",
+        lambda self, scheduler_output, intermediate_tensors: None,
+    )
+
+    result = runner.execute_model(
+        scheduler_output="scheduler-output",
+        intermediate_tensors="proxy",
+        return_decoded_tokens=False,
+    )
+
+    assert result == (types.SimpleNamespace(hidden_states="broadcast-hidden"), None, None, None, None)
+    assert runner.execute_model_state is None
 
 
 def test_vllm_executor_non_last_peer_returns_hidden_states():
@@ -275,7 +421,7 @@ def test_vllm_executor_last_peer_returns_sampled_tokens():
         execute_model=lambda **kwargs: (
             types.SimpleNamespace(hidden_states="unused"),
             torch.tensor([[7], [9]], dtype=torch.long),
-            [7, 9],
+            torch.tensor([7, 9], dtype=torch.long),
             types.SimpleNamespace(),
             None,
         ),
@@ -291,4 +437,5 @@ def test_vllm_executor_last_peer_returns_sampled_tokens():
         return_decoded_tokens=True,
     )
 
-    assert output == {"hidden_states": [7, 9], "probs": None}
+    assert torch.equal(output["hidden_states"], torch.tensor([7, 9], dtype=torch.long))
+    assert output["probs"] is None

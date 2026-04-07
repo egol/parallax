@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 from typing import Dict
 
@@ -35,6 +36,25 @@ class RequestHandler:
 
     def set_scheduler_manage(self, scheduler_manage):
         self.scheduler_manage = scheduler_manage
+
+    def _release_routing_table(self, routing_table, *, released_flag: Dict[str, bool]) -> None:
+        if released_flag["done"]:
+            return
+        released_flag["done"] = True
+        if self.scheduler_manage is None:
+            return
+        try:
+            self.scheduler_manage.release_routing_table(routing_table)
+        except Exception:
+            logger.debug("Failed to release routing table", exc_info=True)
+
+    @staticmethod
+    def _response_from_json_content(content: str) -> Response:
+        payload = json.loads(content)
+        status_code = int(payload.get("status_code", 200)) if isinstance(payload, dict) else 200
+        if isinstance(payload, dict):
+            payload.pop("status_code", None)
+        return JSONResponse(content=payload, status_code=status_code)
 
     def get_stub(self, node_id):
         if node_id not in self.stubs:
@@ -106,6 +126,7 @@ class RequestHandler:
             request_data["routing_table"] = routing_table
             stub = self.get_stub(routing_table[0])
             is_stream = request_data.get("stream", False)
+            released_flag = {"done": False}
             try:
                 if is_stream:
 
@@ -141,6 +162,9 @@ class RequestHandler:
                                     )
                             logger.debug(f"client disconnected for {request_id}")
                             response.cancel()
+                            self._release_routing_table(
+                                routing_table, released_flag=released_flag
+                            )
 
                     resp = StreamingResponse(
                         stream_generator(),
@@ -154,10 +178,15 @@ class RequestHandler:
                     return resp
                 else:
                     response = stub.chat_completion(request_data)
-                    content = (await anext(iterate_in_threadpool(response))).decode()
+                    try:
+                        content = (await anext(iterate_in_threadpool(response))).decode()
+                    finally:
+                        response.cancel()
+                        self._release_routing_table(routing_table, released_flag=released_flag)
                     logger.debug(f"Non-stream response completed for {request_id}")
-                    return Response(content=content, media_type="application/json")
+                    return self._response_from_json_content(content)
             except Exception as e:
+                self._release_routing_table(routing_table, released_flag=released_flag)
                 forward_attempts += 1
                 if forward_attempts < self.MAX_FORWARD_RETRY:
                     # small async delay before re-forwarding

@@ -22,7 +22,8 @@ trap 'on_exit $?' EXIT
 echo "=== Parallax nettest: latency smoke ==="
 
 boot_full_cluster
-echo "$(validate_split_topology "$PARALLAX_LOCALNET_INIT_NODES")"
+split_topology="$(validate_split_topology "$PARALLAX_LOCALNET_INIT_NODES")"
+echo "$split_topology"
 
 # Baseline chat
 echo "--- baseline chat ---"

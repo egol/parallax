@@ -40,6 +40,7 @@ from sglang.srt.utils import (
 )
 
 from parallax.sglang.monkey_patch import apply_parallax_sglang_monkey_patch
+from parallax.sglang.model_config_utils import should_keep_tied_word_embeddings
 from parallax.sglang.monkey_patch_utils.weight_loader_filter import (
     set_layer_range_for_filtering,
 )
@@ -369,8 +370,11 @@ def initialize_sgl_model_runner(
         dtype=dtype,
         quantization=quant_method,
     )
-    # TODO: Fix me
-    model_config.hf_config.tie_word_embeddings = False
+    model_config.hf_config.tie_word_embeddings = should_keep_tied_word_embeddings(
+        model_config.hf_config,
+        start_layer,
+        end_layer,
+    )
     model_config.hf_config.start_layer = start_layer
     model_config.hf_config.end_layer = end_layer
 

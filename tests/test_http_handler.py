@@ -1,5 +1,6 @@
 import asyncio
 from http import HTTPStatus
+from types import SimpleNamespace
 
 try:
     import torch  # type: ignore
@@ -84,3 +85,132 @@ def test_http_handler_stream_error_pushes_queue_event():
     assert error_chunk["payload"]["type"] == "InternalServerError"
     assert error_chunk["payload"]["code"] == HTTPStatus.INTERNAL_SERVER_ERROR.value
     assert sentinel is None
+
+
+def test_http_handler_preserves_final_token_on_length_finish():
+    async def scenario():
+        handler = HTTPHandler.__new__(HTTPHandler)
+        handler.processing_requests = {}
+        handler.recv_from_executor = SimpleNamespace(
+            recv_pyobj=_single_message_recv(
+                {
+                    "rid": "req-length",
+                    "prompt_tokens": 4,
+                    "next_token_id": 3925,
+                    "length": True,
+                }
+            )
+        )
+
+        request_info = HTTPRequestInfo(id="req-length", stream=False)
+        request_info.detokenizer = _FakeDetokenizer("OK")
+        handler.processing_requests["req-length"] = request_info
+
+        task = asyncio.create_task(handler._handle_loop())
+        await asyncio.sleep(0)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return request_info
+
+    request_info = asyncio.run(scenario())
+
+    assert request_info.text == "OK"
+    assert request_info.completion_tokens == 1
+    assert request_info.finish_reason == "length"
+    assert request_info.is_finish is True
+
+
+def test_http_handler_preserves_final_token_on_eos_finish():
+    async def scenario():
+        handler = HTTPHandler.__new__(HTTPHandler)
+        handler.processing_requests = {}
+        handler.recv_from_executor = SimpleNamespace(
+            recv_pyobj=_single_message_recv(
+                {
+                    "rid": "req-eos",
+                    "prompt_tokens": 4,
+                    "next_token_id": 3925,
+                    "eos": True,
+                }
+            )
+        )
+
+        request_info = HTTPRequestInfo(id="req-eos", stream=False)
+        request_info.detokenizer = _FakeDetokenizer("OK")
+        handler.processing_requests["req-eos"] = request_info
+
+        task = asyncio.create_task(handler._handle_loop())
+        await asyncio.sleep(0)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return request_info
+
+    request_info = asyncio.run(scenario())
+
+    assert request_info.text == "OK"
+    assert request_info.completion_tokens == 1
+    assert request_info.finish_reason == "stop"
+    assert request_info.is_finish is True
+
+
+def test_http_handler_suppresses_abort_output():
+    async def scenario():
+        handler = HTTPHandler.__new__(HTTPHandler)
+        handler.processing_requests = {}
+        handler.recv_from_executor = SimpleNamespace(
+            recv_pyobj=_single_message_recv(
+                {
+                    "rid": "req-abort",
+                    "prompt_tokens": 4,
+                    "next_token_id": 3925,
+                    "abort": True,
+                }
+            )
+        )
+
+        request_info = HTTPRequestInfo(id="req-abort", stream=False)
+        request_info.detokenizer = _FakeDetokenizer("OK")
+        handler.processing_requests["req-abort"] = request_info
+
+        task = asyncio.create_task(handler._handle_loop())
+        await asyncio.sleep(0)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return request_info
+
+    request_info = asyncio.run(scenario())
+
+    assert request_info.text == ""
+    assert request_info.completion_tokens == 1
+    assert request_info.finish_reason == "abort"
+    assert request_info.is_finish is True
+
+
+class _FakeDetokenizer:
+    def __init__(self, segment):
+        self.last_segment = ""
+        self._segment = segment
+
+    def add_token(self, _token_id):
+        self.last_segment = self._segment
+
+
+def _single_message_recv(message):
+    state = {"used": False}
+
+    async def _recv_pyobj():
+        if state["used"]:
+            await asyncio.sleep(3600)
+        state["used"] = True
+        return message
+
+    return _recv_pyobj

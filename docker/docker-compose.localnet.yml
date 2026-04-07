@@ -5,6 +5,9 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.localnet
+      args:
+        PARALLAX_LOCALNET_INSTALL_SGLANG: "${PARALLAX_LOCALNET_INSTALL_SGLANG:-0}"
+        PARALLAX_LOCALNET_SGL_KERNEL_JOBS: "${PARALLAX_LOCALNET_SGL_KERNEL_JOBS:-1}"
     image: mycelia/parallax-localnet:dev
     command: sleep infinity
     working_dir: /parallax

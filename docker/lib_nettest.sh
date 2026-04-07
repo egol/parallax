@@ -124,6 +124,48 @@ unblock_traffic() {
   fi
 }
 
+# Block traffic both ways between two containers.
+# Usage: block_traffic_pair <container_a> <container_b>
+block_traffic_pair() {
+  local container_a="$1" container_b="$2"
+  block_traffic "$container_a" "$container_b"
+  block_traffic "$container_b" "$container_a"
+}
+
+# Unblock traffic both ways between two containers.
+# Usage: unblock_traffic_pair <container_a> <container_b>
+unblock_traffic_pair() {
+  local container_a="$1" container_b="$2"
+  unblock_traffic "$container_a" "$container_b"
+  unblock_traffic "$container_b" "$container_a"
+}
+
+# Block direct worker-to-worker traffic across the entire worker mesh.
+block_worker_mesh() {
+  local pairs=(
+    "worker1 worker2"
+    "worker1 worker3"
+    "worker2 worker3"
+  )
+  local pair
+  for pair in "${pairs[@]}"; do
+    block_traffic_pair ${pair}
+  done
+}
+
+# Remove direct worker-to-worker blocks across the entire worker mesh.
+unblock_worker_mesh() {
+  local pairs=(
+    "worker1 worker2"
+    "worker1 worker3"
+    "worker2 worker3"
+  )
+  local pair
+  for pair in "${pairs[@]}"; do
+    unblock_traffic_pair ${pair}
+  done
+}
+
 # --- Connectivity verification ---
 
 # Assert that a container can reach a target on a given port.

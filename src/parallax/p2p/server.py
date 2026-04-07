@@ -9,6 +9,7 @@ It is used to handle the communication between the peers, and communicate with t
 
 import dataclasses
 import enum
+import math
 import multiprocessing
 import os
 import random
@@ -39,6 +40,9 @@ _DEFAULT_NODE_ANNOUNCE_INTERVAL_SEC = float(
 )
 _ACTIVE_INIT_NODE_ANNOUNCE_INTERVAL_SEC = float(
     os.environ.get("PARALLAX_NODE_INIT_ANNOUNCE_INTERVAL_SEC", "1.0")
+)
+_NODE_UPDATE_RPC_TIMEOUT_SEC = float(
+    os.environ.get("PARALLAX_NODE_UPDATE_RPC_TIMEOUT_SEC", "5.0")
 )
 _JOIN_RETRY_FOREVER_ENV = "PARALLAX_JOIN_RETRY_FOREVER"
 _INIT_SCHEDULER_LOSS_LIMIT = int(os.environ.get("PARALLAX_INIT_SCHEDULER_LOSS_LIMIT", "3"))
@@ -454,6 +458,9 @@ class GradientServer:
                 return _ACTIVE_INIT_NODE_ANNOUNCE_INTERVAL_SEC
         return _DEFAULT_NODE_ANNOUNCE_INTERVAL_SEC
 
+    def _node_update_rpc_timeout_seconds(self) -> float:
+        return max(1, int(math.ceil(_NODE_UPDATE_RPC_TIMEOUT_SEC)))
+
     def _join_retry_forever(self) -> bool:
         override = os.getenv(_JOIN_RETRY_FOREVER_ENV, "").strip().lower()
         if override in {"1", "true", "yes", "on"}:
@@ -468,10 +475,12 @@ class GradientServer:
     def _sync_to_shared_state(self):
         """Sync current layer allocation and status to shared state if available"""
         if hasattr(self, "_shared_state") and self._shared_state is not None:
+            node_id = self.lattica.peer_id() if self.lattica is not None else None
             self._shared_state.update(
                 block_start_index=self.block_start_index,
                 block_end_index=self.block_end_index,
                 model_name=self.model_name,
+                node_id=node_id,
                 tp_size=self.tp_size,
                 enable_weight_refit=self.enable_weight_refit,
                 weight_refit_mode=self.weight_refit_mode,
@@ -547,6 +556,46 @@ class GradientServer:
 
         add(self.scheduler_peer_id)
         return candidate_peer_ids
+
+    def _group_abort_requests(self, requests: List[forward_pb2.Req]):
+        grouped_requests = {}
+        for req in requests:
+            if len(req.routing_table) == 0 and self.scheduler_addr is None:
+                assert (
+                    self.block_start_index == 0
+                ), "Request routing table is not set for non-head rank"
+
+                req.routing_table.extend(self.routing_table)
+                logger.info(
+                    f"Set routing table {self.routing_table} for request {req.rid}"
+                )
+
+            if len(req.routing_table) == 0:
+                logger.error(f"Abort Request {req.rid} has no routing table, drop it")
+                continue
+
+            if (
+                self.scheduler_peer_id is not None
+                and self.scheduler_peer_id in req.routing_table
+            ):
+                grouped_requests.setdefault(self.scheduler_peer_id, []).append(req)
+                continue
+
+            for peer_id in req.routing_table:
+                grouped_requests.setdefault(peer_id, []).append(req)
+
+        return grouped_requests
+
+    def _dispatch_abort_request(
+        self, peer_id: str, abort_request: forward_pb2.AbortRequest
+    ) -> None:
+        stub = self.get_stub(peer_id)
+        logger.info(
+            f"Send abort request: {[r.rid for r in abort_request.reqs]} to: {peer_id}"
+        )
+        # Abort propagation is best-effort. Waiting on scheduler abort RPCs can
+        # stall the same control-plane connection used by node_update heartbeats.
+        stub.rpc_abort(abort_request)
 
     def check_and_release_disk_weight(self):
         """Only save 3 history versions of weight"""
@@ -975,37 +1024,13 @@ class GradientServer:
                     if len(abort_request.reqs) == 0:
                         raise RuntimeError("No requests in the abort request")
 
-                    grouped_requests = {}
-                    for req in abort_request.reqs:
-                        # set routing table if not scheduler mode
-                        if len(req.routing_table) == 0 and self.scheduler_addr is None:
-                            assert (
-                                self.block_start_index == 0
-                            ), "Request routing table is not set for non-head rank"
-
-                            req.routing_table.extend(self.routing_table)
-                            logger.info(
-                                f"Set routing table {self.routing_table} for request {req.rid}"
-                            )
-
-                        if len(req.routing_table) > 0:
-                            # broadcast to all other nodes
-                            for peer_id in req.routing_table:
-                                if peer_id not in grouped_requests:
-                                    grouped_requests[peer_id] = []
-                                grouped_requests[peer_id].append(req)
-                        else:
-                            logger.error(f"Abort Request {req.rid} has no routing table, drop it")
+                    grouped_requests = self._group_abort_requests(abort_request.reqs)
 
                     for peer_id, requests in grouped_requests.items():
                         if peer_id != self.lattica.peer_id():
-                            stub = self.get_stub(peer_id)
-                            logger.info(
-                                f"Send abort request: {[r.rid for r in requests]} to: {peer_id}"
-                            )
                             new_abort_request = forward_pb2.AbortRequest()
                             new_abort_request.reqs.extend(requests)
-                            stub.rpc_abort(new_abort_request)
+                            self._dispatch_abort_request(peer_id, new_abort_request)
                 else:
                     logger.error(f"Unknown message type: {message_type}")
 
@@ -1027,7 +1052,9 @@ class GradientServer:
                             )
                             # Get the response result
                             response, refit_message = (
-                                response_future.result(timeout=30)
+                                response_future.result(
+                                    timeout=self._node_update_rpc_timeout_seconds()
+                                )
                                 if hasattr(response_future, "result")
                                 else response_future
                             )
@@ -1149,6 +1176,13 @@ class GradientServer:
                             f"Failed to announce {self.prefix_id}_{self.lattica.peer_id()}: {e}",
                             exc_info=True,
                         )
+                        try:
+                            self._announce_current_range()
+                        except Exception:
+                            logger.debug(
+                                "Failed to publish current range after node-update failure",
+                                exc_info=True,
+                            )
                         if (
                             self.scheduler_addr is not None
                             and self._scheduler_reachable_once
@@ -1185,43 +1219,62 @@ class GradientServer:
     def get_node_info(self, is_update: bool = False):
         # update rtt to nodes
         if time.time() - self.rtt_last_update > self.rtt_update_interval:
-            self.rtts = {}
-            all_peers = []
-            for _ in range(1 if is_update else 10):
-                all_peers = self._discover_candidate_peer_ids()
-                if len(all_peers) > 0 and self.scheduler_peer_id in all_peers:
-                    break
-                logger.warning(
-                    "No peers found or scheduler peer id not found, waiting for 1 second."
-                )
-                time.sleep(1)
+            if is_update:
+                refreshed_rtts = dict(self.rtts)
+                candidate_peers = list(refreshed_rtts.keys())
+                if (
+                    self.scheduler_peer_id is not None
+                    and self.scheduler_peer_id not in candidate_peers
+                ):
+                    candidate_peers.append(self.scheduler_peer_id)
 
-            if len(all_peers) == 0 or self.scheduler_peer_id not in all_peers:
-                logger.warning(
-                    "No peers found or scheduler peer id not found."
-                )
-                if not is_update:
+                for peer_id in candidate_peers:
+                    try:
+                        raw_rtt = self.lattica.get_peer_rtt(peer_id)
+                    except Exception as e:
+                        logger.warning(f"Failed to get rtt to {peer_id}: {e}")
+                        raw_rtt = None
+                    if raw_rtt is not None:
+                        refreshed_rtts[peer_id] = raw_rtt * 1000
+                    elif peer_id not in refreshed_rtts:
+                        refreshed_rtts[peer_id] = 100
+                self.rtts = refreshed_rtts
+                self.rtt_last_update = time.time()
+            else:
+                self.rtts = {}
+                all_peers = []
+                for _ in range(10):
+                    all_peers = self._discover_candidate_peer_ids()
+                    if len(all_peers) > 0 and self.scheduler_peer_id in all_peers:
+                        break
+                    logger.warning(
+                        "No peers found or scheduler peer id not found, waiting for 1 second."
+                    )
+                    time.sleep(1)
+
+                if len(all_peers) == 0 or self.scheduler_peer_id not in all_peers:
+                    logger.warning("No peers found or scheduler peer id not found.")
                     logger.warning(
                         "Returning empty node info because this is not an update heartbeat."
                     )
                     return {}
 
-            for peer_id in all_peers:
-                rtt = None
-                for _ in range(1 if is_update else 30):
-                    try:
-                        raw_rtt = self.lattica.get_peer_rtt(peer_id)
-                        if raw_rtt is not None:
-                            rtt = raw_rtt * 1000
-                    except Exception as e:
-                        logger.warning(f"Failed to get rtt to {peer_id}: {e}")
-                    if rtt is not None:
-                        break
-                    logger.warning(f"Failed to get rtt to {peer_id}, waiting for 1 second.")
-                    time.sleep(1)
+                for peer_id in all_peers:
+                    rtt = None
+                    for _ in range(30):
+                        try:
+                            raw_rtt = self.lattica.get_peer_rtt(peer_id)
+                            if raw_rtt is not None:
+                                rtt = raw_rtt * 1000
+                        except Exception as e:
+                            logger.warning(f"Failed to get rtt to {peer_id}: {e}")
+                        if rtt is not None:
+                            break
+                        logger.warning(f"Failed to get rtt to {peer_id}, waiting for 1 second.")
+                        time.sleep(1)
 
-                self.rtts[peer_id] = rtt if rtt is not None else 100
-            self.rtt_last_update = time.time()
+                    self.rtts[peer_id] = rtt if rtt is not None else 100
+                self.rtt_last_update = time.time()
 
         info = {
             "node_id": self.lattica.peer_id(),

@@ -196,6 +196,7 @@ class SharedState:
         shared_dict["block_start_index"] = None
         shared_dict["block_end_index"] = None
         shared_dict["model_name"] = None
+        shared_dict["node_id"] = None
         shared_dict["tp_size"] = None
         shared_dict["enable_weight_refit"] = None
         shared_dict["weight_refit_mode"] = None

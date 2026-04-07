@@ -274,7 +274,13 @@ class NodeChatHttpServer:
                         if not content:
                             raise RuntimeError("Upstream chat completion returned an empty body")
                         logger.debug(f"Non-stream response completed for {request_id}")
-                        return JSONResponse(content=json.loads(content))
+                        payload = json.loads(content)
+                        status_code = (
+                            int(payload.get("status_code", 200)) if isinstance(payload, dict) else 200
+                        )
+                        if isinstance(payload, dict):
+                            payload.pop("status_code", None)
+                        return JSONResponse(content=payload, status_code=status_code)
                 except Exception as e:
                     logger.exception(f"Error in _forward_request: {e}")
                     return JSONResponse(

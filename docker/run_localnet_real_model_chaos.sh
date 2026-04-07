@@ -14,8 +14,9 @@ ARTIFACT_DIR="${PARALLAX_LOCALNET_ARTIFACT_DIR:-/tmp/parallax-localnet-chaos-rea
 PARALLAX_LOCALNET_READY_TIMEOUT="${PARALLAX_LOCALNET_READY_TIMEOUT:-300}"
 
 export PARALLAX_LOCALNET_TEST_MODE="${PARALLAX_LOCALNET_TEST_MODE:-0}"
+export PARALLAX_LOCALNET_INSTALL_SGLANG="${PARALLAX_LOCALNET_INSTALL_SGLANG:-1}"
 WORKER_ENV="PARALLAX_TEST_RUNTIME=transformers PARALLAX_TEST_OVERRIDE_MEMORY_GB=${PARALLAX_TEST_OVERRIDE_MEMORY_GB:-0.7}"
-WORKER_JOIN_ARGS="${WORKER_JOIN_ARGS:---kv-cache-memory-fraction 0.45 --max-total-tokens 4096 --max-sequence-length 1024 --max-batch-size 2 --max-num-tokens-per-batch 512}"
+WORKER_JOIN_ARGS="${WORKER_JOIN_ARGS:---kv-cache-memory-fraction 0.7 --max-total-tokens 4096 --max-sequence-length 1024 --max-batch-size 2 --max-num-tokens-per-batch 512}"
 
 source "$SCRIPT_DIR/lib_localnet.sh"
 
@@ -25,9 +26,14 @@ request_real_model_chat() {
   compose exec -T host python -c "import json,time,urllib.request,sys
 payload = json.dumps({
     'model': '$MODEL_PATH',
-    'messages': [{'role': 'user', 'content': 'Say the word recover exactly once.'}],
+    'messages': [{'role': 'user', 'content': 'Reply with exactly one token: OK'}],
     'stream': False,
-    'max_tokens': 12,
+    'max_tokens': 4,
+    'sampling_params': {
+        'temperature': 0.0,
+        'top_k': 1,
+        'top_p': 1.0,
+    },
 }).encode()
 request = urllib.request.Request(
     'http://127.0.0.1:3200/v1/chat/completions',
@@ -58,7 +64,8 @@ fi
 
 echo "real-model chaos lane uses a small CPU model and can still take time on a cold cache or slow network"
 boot_full_cluster
-echo "$(validate_split_topology "$PARALLAX_LOCALNET_INIT_NODES")"
+split_topology="$(validate_split_topology "$PARALLAX_LOCALNET_INIT_NODES")"
+echo "$split_topology"
 
 baseline_response="$(request_real_model_chat)"
 python3 - <<'PY' "$baseline_response" "$MODEL_PATH"
@@ -70,7 +77,8 @@ model_name = sys.argv[2]
 if payload.get("model") != model_name:
     raise SystemExit(f"unexpected model name: {payload.get('model')}")
 content = payload["choices"][0]["message"]["content"].strip()
-if not content or "[parallax-test-mode:" in content:
+normalized = content.strip().strip(".!?,:;\"'").upper()
+if not content or "[parallax-test-mode:" in content or normalized != "OK":
     raise SystemExit("unexpected baseline real-model payload: " + content)
 print(json.dumps(payload))
 PY
@@ -83,7 +91,8 @@ sleep 2
 start_worker_join worker1 3101 4101 5101 "$scheduler_addr"
 wait_status "data.get('topology', {}).get('totals', {}).get('registered_workers', 0) >= 3" 120 >/dev/null
 wait_status "data.get('status') == 'available' and data.get('topology', {}).get('totals', {}).get('ready_pipelines', 0) >= 1" 120 >/dev/null
-echo "$(validate_split_topology "$PARALLAX_LOCALNET_INIT_NODES")"
+split_topology="$(validate_split_topology "$PARALLAX_LOCALNET_INIT_NODES")"
+echo "$split_topology"
 
 compose stop worker2 >/dev/null
 wait_status "data.get('topology', {}).get('totals', {}).get('registered_workers', 0) < 3 or data.get('topology', {}).get('totals', {}).get('ready_pipelines', 0) < 1" 120 >/dev/null
@@ -93,7 +102,8 @@ sleep 2
 start_worker_join worker2 3102 4102 5102 "$scheduler_addr"
 wait_status "data.get('topology', {}).get('totals', {}).get('registered_workers', 0) >= 3" 120 >/dev/null
 wait_status "data.get('status') == 'available' and data.get('topology', {}).get('totals', {}).get('ready_pipelines', 0) >= 1" 120 >/dev/null
-echo "$(validate_split_topology "$PARALLAX_LOCALNET_INIT_NODES")"
+split_topology="$(validate_split_topology "$PARALLAX_LOCALNET_INIT_NODES")"
+echo "$split_topology"
 
 recovered_response="$(request_real_model_chat)"
 python3 - <<'PY' "$recovered_response" "$MODEL_PATH"
@@ -105,7 +115,8 @@ model_name = sys.argv[2]
 if payload.get("model") != model_name:
     raise SystemExit(f"unexpected model name: {payload.get('model')}")
 content = payload["choices"][0]["message"]["content"].strip()
-if not content or "[parallax-test-mode:" in content:
+normalized = content.strip().strip(".!?,:;\"'").upper()
+if not content or "[parallax-test-mode:" in content or normalized != "OK":
     raise SystemExit("unexpected recovery real-model payload: " + content)
 print(json.dumps(payload))
 PY

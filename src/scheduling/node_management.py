@@ -431,6 +431,19 @@ class NodeManager:
             )
             self._nodes[node_id].add_request()
 
+    def remove_request(self, node_id: str) -> None:
+        """Remove a request from a node."""
+        with self._lock:
+            node = self._nodes.get(node_id)
+            if node is None:
+                raise ValueError(f"Node {node_id} not found in registry")
+            assigned = int(self.node_assigned_request_count.get(node_id, 0))
+            if assigned <= 1:
+                self.node_assigned_request_count.pop(node_id, None)
+            else:
+                self.node_assigned_request_count[node_id] = assigned - 1
+            node.remove_request()
+
     def register_pipelines(self, pipelines: List[List[str]]) -> Dict[int, List[str]]:
         """Fixed-pipeline registry (for round-robin routing)
 

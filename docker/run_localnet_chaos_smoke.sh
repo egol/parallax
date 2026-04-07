@@ -16,7 +16,8 @@ source "$SCRIPT_DIR/lib_localnet.sh"
 trap 'on_exit $?' EXIT
 
 boot_full_cluster
-echo "$(validate_split_topology "$PARALLAX_LOCALNET_INIT_NODES")"
+split_topology="$(validate_split_topology "$PARALLAX_LOCALNET_INIT_NODES")"
+echo "$split_topology"
 
 baseline_response="$(request_synthetic_chat)"
 python3 - <<'PY' "$baseline_response"
@@ -38,7 +39,8 @@ sleep 2
 start_worker_join worker1 3101 4101 5101 "$scheduler_addr"
 wait_status "data.get('topology', {}).get('totals', {}).get('registered_workers', 0) >= 3" 90 >/dev/null
 wait_status "data.get('status') == 'available' and data.get('topology', {}).get('totals', {}).get('ready_pipelines', 0) >= 1" 90 >/dev/null
-echo "$(validate_split_topology "$PARALLAX_LOCALNET_INIT_NODES")"
+split_topology="$(validate_split_topology "$PARALLAX_LOCALNET_INIT_NODES")"
+echo "$split_topology"
 
 recovered_response="$(request_synthetic_chat)"
 python3 - <<'PY' "$recovered_response"

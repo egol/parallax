@@ -29,18 +29,12 @@ COPY README.md ./README.md
 COPY pyproject.toml ./pyproject.toml
 
 ARG SGLANG_VERSION=v0.5.7
+ARG PARALLAX_LOCALNET_INSTALL_SGLANG=0
+ARG PARALLAX_LOCALNET_SGL_KERNEL_JOBS=1
 
 RUN pip install --upgrade pip setuptools wheel \
     && pip install --extra-index-url https://download.pytorch.org/whl/cpu \
         torch==2.9.0 \
-        torchvision==0.24.0 \
-        triton==3.5.0 \
-    && git clone --depth 1 --branch ${SGLANG_VERSION} https://github.com/sgl-project/sglang.git /tmp/sglang \
-    && cp /tmp/sglang/python/pyproject_cpu.toml /tmp/sglang/python/pyproject.toml \
-    && pip install /tmp/sglang/python \
-    && cp /tmp/sglang/sgl-kernel/pyproject_cpu.toml /tmp/sglang/sgl-kernel/pyproject.toml \
-    && pip install scikit-build-core \
-    && pip install --no-build-isolation /tmp/sglang/sgl-kernel \
     && pip install \
         "msgpack>=1.0.7" \
         "safetensors>=0.5.1" \
@@ -61,10 +55,23 @@ RUN pip install --upgrade pip setuptools wheel \
         "dijkstar==2.6.0" \
         "lattica==1.0.21" \
         orjson \
+    && if [ "${PARALLAX_LOCALNET_INSTALL_SGLANG}" = "1" ]; then \
+        pip install --extra-index-url https://download.pytorch.org/whl/cpu \
+            torchvision==0.24.0 \
+            triton==3.5.0 \
+        && git clone --depth 1 --branch ${SGLANG_VERSION} https://github.com/sgl-project/sglang.git /tmp/sglang \
+        && cp /tmp/sglang/python/pyproject_cpu.toml /tmp/sglang/python/pyproject.toml \
+        && pip install /tmp/sglang/python \
+        && cp /tmp/sglang/sgl-kernel/pyproject_cpu.toml /tmp/sglang/sgl-kernel/pyproject.toml \
+        && pip install scikit-build-core \
+        && CMAKE_BUILD_PARALLEL_LEVEL=${PARALLAX_LOCALNET_SGL_KERNEL_JOBS} \
+           pip install --no-build-isolation /tmp/sglang/sgl-kernel; \
+      fi \
     && rm -rf /tmp/sglang
 
 COPY src ./src
 COPY docker/test-models ./docker/test-models
 COPY docker/bench_collect.py ./docker/bench_collect.py
+COPY docker/real_model_baseline.py ./docker/real_model_baseline.py
 
 RUN pip install --no-deps -e .

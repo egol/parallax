@@ -9,6 +9,12 @@ The default localnet image is intentionally lightweight. It uses
 and join control plane, but serve a synthetic chat backend instead of pulling
 GPU model-serving dependencies or real weights.
 
+The default image now also skips building the CPU SGLang kernel stack. That
+keeps the synthetic and lighter real-model lanes within a modest Docker
+Desktop memory budget. If you explicitly need the old heavier CPU
+SGLang build, set `PARALLAX_LOCALNET_INSTALL_SGLANG=1` before `docker compose`
+or any of the harness scripts.
+
 Use it when:
 
 - the single-machine localhost runbook is not enough
@@ -42,10 +48,22 @@ For the abrupt-disconnect synthetic chaos path:
 ./parallax/docker/run_localnet_chaos_smoke.sh
 ```
 
+For the centralized split-proof synthetic path:
+
+```bash
+./parallax/docker/run_nettest_centralized_split_smoke.sh
+```
+
 For the real-model CPU smoke path:
 
 ```bash
 ./parallax/docker/run_localnet_real_model_smoke.sh
+```
+
+For the centralized split-proof real-model path:
+
+```bash
+./parallax/docker/run_nettest_centralized_split_real_model_smoke.sh
 ```
 
 For the abrupt-disconnect real-model chaos path:
@@ -95,7 +113,7 @@ In a second host shell, bootstrap the scheduler:
 ```bash
 curl -sS -X POST http://127.0.0.1:3301/scheduler/bootstrap \
   -H 'Content-Type: application/json' \
-  -d '{"is_local_network": true}'
+  -d '{"network_mode": "centralized"}'
 ```
 
 Record the scheduler peer ID from the host startup logs, then build the
@@ -167,7 +185,7 @@ Example scheduler init from the host container:
   -d '{
     "model_name": "/parallax/docker/test-models/parallax-smoke",
     "init_nodes_num": 2,
-    "is_local_network": true
+    "network_mode": "centralized"
   }'
 ```
 
@@ -236,6 +254,13 @@ Network partition (iptables DROP on worker1, verify detection + recovery):
 ./parallax/docker/run_nettest_partition_smoke.sh
 ```
 
+Centralized split-proof synthetic lane (workers cannot reach each other
+directly, verify topology and host-routed forwarding only):
+
+```bash
+./parallax/docker/run_nettest_centralized_split_smoke.sh
+```
+
 Bandwidth constraint (256kbit on workers, verify chat still works):
 
 ```bash
@@ -278,6 +303,26 @@ The nettest scripts use two shared libraries:
 
 - `lib_localnet.sh` — common compose, wait, and bootstrap helpers
 - `lib_nettest.sh` — tc/iptables wrappers for network simulation
+
+The shared bootstrap and init helpers now post explicit
+`"network_mode": "centralized"` payloads, so localnet runs match the product
+contract instead of relying on the deprecated boolean shim.
+
+The centralized split-proof synthetic lane is topology-only. It proves that
+worker-to-worker traffic can stay blocked for the whole run while host-routed
+forwarding still forms a ready split pipeline and returns a synthetic response.
+
+The centralized split-proof real-model lane is the semantic proof. It keeps the
+same blocked worker mesh, but then:
+
+- runs a prompt matrix through the host chat proxy
+- compares every split response against an unsplit baseline generated from the
+  same request-preparation path
+- collects per-worker structured request traces and asserts that all three
+  stages processed each request
+
+The `Skipping CUDA graph capture` warning is expected when eager mode is
+enabled and is not itself a test failure.
 
 These are also available for ad-hoc use in interactive Docker sessions.
 

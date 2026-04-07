@@ -71,6 +71,53 @@ def _update_loading_runtime_state(shared_state, model_name: str) -> None:
     )
 
 
+def _resolve_vllm_decode_output(execute_model_result: Any):
+    if execute_model_result is None:
+        return None
+    get_output = getattr(execute_model_result, "get_output", None)
+    if callable(get_output):
+        return get_output()
+    return execute_model_result
+
+
+def _extract_vllm_sampled_token_ids(sample_output: Any, resolved_output: Any):
+    sampled_token_ids = getattr(resolved_output, "sampled_token_ids", None)
+    if sampled_token_ids is None:
+        sampled_token_ids = getattr(sample_output, "_sampled_token_ids", None)
+    return _normalize_sampled_token_ids(sampled_token_ids)
+
+
+def _normalize_sampled_token_ids(sampled_token_ids: Any):
+    if sampled_token_ids is None:
+        return None
+    if isinstance(sampled_token_ids, torch.Tensor):
+        if sampled_token_ids.ndim == 1:
+            return sampled_token_ids.unsqueeze(-1)
+        return sampled_token_ids
+    if (
+        isinstance(sampled_token_ids, list)
+        and sampled_token_ids
+        and not isinstance(sampled_token_ids[0], (list, tuple))
+    ):
+        return [[token_id] for token_id in sampled_token_ids]
+    return sampled_token_ids
+
+
+def _normalize_sampled_token_ids_cpu(sampled_token_ids_cpu: Any, sampled_token_ids: Any):
+    source = sampled_token_ids_cpu if sampled_token_ids_cpu is not None else sampled_token_ids
+    if source is None:
+        return None
+    if isinstance(source, torch.Tensor):
+        tensor = source.detach().cpu()
+    else:
+        tensor = torch.as_tensor(source, dtype=torch.long)
+    if tensor.ndim == 0:
+        tensor = tensor.unsqueeze(0)
+    if tensor.ndim > 1:
+        tensor = tensor.reshape(tensor.shape[0], -1)[:, 0]
+    return tensor
+
+
 def _resolve_attention_config(attention_backend: str) -> AttentionConfig:
     backend_mapping = {
         "torch_native": AttentionBackendEnum.TORCH_SDPA,
@@ -343,16 +390,7 @@ class ParallaxVLLMModelRunner(GPUModelRunner):
             )
             logger.debug("Successfully initialized intermediate_tensors buffer")
 
-        execute_model_state = super().execute_model(scheduler_output, intermediate_tensors)
-        if execute_model_state is not None:
-            self.execute_model_state = execute_model_state
-        else:
-            execute_model_state = getattr(self, "execute_model_state", None)
-        if execute_model_state is None:
-            raise RuntimeError(
-                "vLLM execute_model returned no execution state and did not populate "
-                "self.execute_model_state."
-            )
+        execute_model_result = super().execute_model(scheduler_output, intermediate_tensors)
 
         sampled_token_ids = None
         sampled_token_ids_cpu = None
@@ -360,15 +398,66 @@ class ParallaxVLLMModelRunner(GPUModelRunner):
         logits = None
 
         if return_decoded_tokens:
-            if hasattr(execute_model_state, "logits"):
-                logits = execute_model_state.logits
+            if execute_model_result is None:
+                execute_model_state = getattr(self, "execute_model_state", None)
+                if execute_model_state is None:
+                    raise RuntimeError(
+                        "vLLM execute_model returned None without populating execute_model_state."
+                    )
+                if hasattr(execute_model_state, "logits"):
+                    logits = execute_model_state.logits
 
-            sampler_output = super().sample_tokens(grammar_output=None)
-            sampled_token_ids = sampler_output._sampled_token_ids
-            sampled_token_ids_cpu = sampler_output.sampled_token_ids_cpu
+                sampler_output = super().sample_tokens(grammar_output=None)
+                resolved_output = _resolve_vllm_decode_output(sampler_output)
+                sampled_token_ids = _extract_vllm_sampled_token_ids(sampler_output, resolved_output)
+                sampled_token_ids_cpu_source = getattr(sampler_output, "sampled_token_ids_cpu", None)
+                if sampled_token_ids_cpu_source is None:
+                    sampled_token_ids_cpu_source = getattr(
+                        resolved_output, "sampled_token_ids_cpu", None
+                    )
+                sampled_token_ids_cpu = _normalize_sampled_token_ids_cpu(
+                    sampled_token_ids_cpu_source,
+                    sampled_token_ids,
+                )
+                return (
+                    resolved_output,
+                    sampled_token_ids,
+                    sampled_token_ids_cpu,
+                    sampler_output,
+                    logits,
+                )
+
+            resolved_output = _resolve_vllm_decode_output(execute_model_result)
+            if resolved_output is None:
+                raise RuntimeError("vLLM decode output resolved to None.")
+            if hasattr(resolved_output, "logits"):
+                logits = resolved_output.logits
+
+            sampled_token_ids = _extract_vllm_sampled_token_ids(execute_model_result, resolved_output)
+            sampled_token_ids_cpu_source = getattr(execute_model_result, "sampled_token_ids_cpu", None)
+            if sampled_token_ids_cpu_source is None:
+                sampled_token_ids_cpu_source = getattr(resolved_output, "sampled_token_ids_cpu", None)
+            sampled_token_ids_cpu = _normalize_sampled_token_ids_cpu(
+                sampled_token_ids_cpu_source,
+                sampled_token_ids,
+            )
+            sampler_output = execute_model_result
+            execute_model_result = resolved_output
+        else:
+            if execute_model_result is None:
+                execute_model_result = getattr(self, "execute_model_state", None)
+                if execute_model_result is None:
+                    raise RuntimeError(
+                        "vLLM execute_model returned no intermediate tensors and did not "
+                        "populate execute_model_state."
+                    )
+                # Upstream decode/broadcast paths leave transient execution state cached
+                # until sample_tokens() runs. Parallax non-last peers do not consume
+                # sampled tokens, so clear it after extracting the hidden states.
+                self.execute_model_state = None
 
         return (
-            execute_model_state,
+            execute_model_result,
             sampled_token_ids,
             sampled_token_ids_cpu,
             sampler_output,

@@ -20,6 +20,7 @@ from parallax.server.request import (
     Request,
     RequestStatus,
 )
+from parallax.sglang.output_utils import gather_sampled_token_probs
 from parallax.sglang.batch_info import (
     form_sgl_batch_decode,
     form_sgl_batch_prefill,
@@ -313,6 +314,9 @@ class SGLExecutor(BaseExecutor):
                 if hasattr(req, "hidden_states") and req.hidden_states is not None:
                     if hasattr(req.hidden_states, "to"):  # PyTorch tensor
                         req.hidden_states = req.hidden_states.to(self.device)
+                if hasattr(req, "residual_states") and req.residual_states is not None:
+                    if hasattr(req.residual_states, "to"):  # PyTorch tensor
+                        req.residual_states = req.residual_states.to(self.device)
         if len(requests) > 0:
             logger.debug(f"Handling {len(requests)} requests.")
 
@@ -440,19 +444,22 @@ class SGLExecutor(BaseExecutor):
             token_probs = None
             # Extract probs for the sampled tokens only if needed
             if needs_probs and hasattr(logits_output, "next_token_logits"):
-                # Get probs for sampled tokens (next_token_logits contains probabilities)
-                real_probs = torch.gather(logits_output.next_token_logits, 1, next_token_ids)
+                # next_token_ids can be [batch] or [batch, 1] depending on backend path.
+                real_probs = gather_sampled_token_probs(
+                    logits_output.next_token_logits,
+                    next_token_ids,
+                )
                 token_probs = real_probs.cpu().float().tolist()
 
             # Return dict with token_ids and optional probs
             return {"hidden_states": next_token_ids, "probs": token_probs}
         else:
             # Intermediate peer: return hidden states for next peer
-            # Note: SGLang stores hidden_states + residual separately
-            final_hidden_states = (
-                logits_output.tensors["hidden_states"] + logits_output.tensors["residual"]
-            )
-            return {"hidden_states": final_hidden_states, "probs": None}
+            return {
+                "hidden_states": logits_output.tensors["hidden_states"],
+                "residual_states": logits_output.tensors["residual"],
+                "probs": None,
+            }
 
     def _release_request(self, rid: str):
         """Release per-request resources in SGLang."""
@@ -568,10 +575,23 @@ class SGLExecutor(BaseExecutor):
                 dim=0,
             )
 
-            # Create residual tensor with same shape
-            residual = torch.zeros(
-                hidden_states.shape, dtype=hidden_states.dtype, device=hidden_states.device
-            )
+            if any(getattr(req, "residual_states", None) is not None for req in batched_requests):
+                residual = torch.cat(
+                    [
+                        (
+                            req.residual_states
+                            if req.residual_states.ndim == 2
+                            else req.residual_states.unsqueeze(0)
+                        )
+                        for req in batched_requests
+                    ],
+                    dim=0,
+                )
+            else:
+                # Backward-compatible fallback for senders that only provided hidden states.
+                residual = torch.zeros(
+                    hidden_states.shape, dtype=hidden_states.dtype, device=hidden_states.device
+                )
 
             pp_proxy_tensors = PPProxyTensors(
                 {
@@ -647,10 +667,23 @@ class SGLExecutor(BaseExecutor):
                 dim=0,
             )
 
-            # Create residual tensor with same shape
-            residual = torch.zeros(
-                hidden_states.shape, dtype=hidden_states.dtype, device=hidden_states.device
-            )
+            if any(getattr(req, "residual_states", None) is not None for req in batched_requests):
+                residual = torch.cat(
+                    [
+                        (
+                            req.residual_states
+                            if req.residual_states.ndim == 2
+                            else req.residual_states.unsqueeze(0)
+                        )
+                        for req in batched_requests
+                    ],
+                    dim=0,
+                )
+            else:
+                # Backward-compatible fallback for senders that only provided hidden states.
+                residual = torch.zeros(
+                    hidden_states.shape, dtype=hidden_states.dtype, device=hidden_states.device
+                )
 
             pp_proxy_tensors = PPProxyTensors(
                 {
