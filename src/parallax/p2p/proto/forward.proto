@@ -39,6 +39,7 @@ message Req {
   optional float token_prob = 9;  // Probability value for the sampled token
   bool return_probs = 10;  // Whether to return probabilities
   bytes residual = 11;
+  repeated int32 output_ids = 12;
 }
 
 message SamplingParams {

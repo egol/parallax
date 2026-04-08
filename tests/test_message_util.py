@@ -75,8 +75,9 @@ class TestMessageUtil:
         hidden_states = mx.array([[0.0]], dtype=mx.float32)
         request = IntermediateRequest(
             request_id=self.request_id,
-            input_ids=[],
-            current_position=10,
+            input_ids=[1, 2, 3],
+            output_ids=[41, 42],
+            current_position=5,
             status=RequestStatus.DECODING,
             hidden_states=hidden_states,
             next_token_id=42,
@@ -91,6 +92,8 @@ class TestMessageUtil:
         proto_req = forward_request.reqs[0]
         assert proto_req.rid == self.request_id
         assert proto_req.next_token_id == 42
+        assert list(proto_req.output_ids) == [41, 42]
+        assert proto_req.output_length == 2
         assert proto_req.hidden_states  # hidden_states should be serialized
 
     def test_proto_to_request_conversion(self):
@@ -99,10 +102,11 @@ class TestMessageUtil:
         original_request = IntermediateRequest(
             request_id=self.request_id,
             input_ids=[10, 20],
-            current_position=12,
-            status=RequestStatus.PREFILLING,
+            output_ids=[30, 40],
+            current_position=4,
+            status=RequestStatus.DECODING,
             hidden_states=hidden_states,
-            next_token_id=50,
+            next_token_id=40,
             sampling_params=self.sampling_params,
             routing_table=["nodeA"],
             lora_path=None,
@@ -117,6 +121,7 @@ class TestMessageUtil:
         assert converted_request.request_id == original_request.request_id
         assert converted_request.status == original_request.status
         assert converted_request.input_ids == original_request.input_ids
+        assert converted_request.output_ids == original_request.output_ids
         # current_position = output_length + len(input_ids)
         assert converted_request.current_position == original_request.current_position
         assert converted_request.next_token_id == original_request.next_token_id

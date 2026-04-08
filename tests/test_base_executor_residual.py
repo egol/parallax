@@ -88,3 +88,47 @@ def test_prepare_next_batch_requests_preserves_decode_residual_slices():
     assert torch.equal(next_requests[0].residual_states, residual_states[0:1, :])
     assert torch.equal(next_requests[1].hidden_states, hidden_states[1:2, :])
     assert torch.equal(next_requests[1].residual_states, residual_states[1:2, :])
+
+
+def test_prepare_next_single_request_preserves_output_history_from_first_peer():
+    executor = _make_executor(is_first_peer=True, is_last_peer=False)
+    request = InitialRequest(
+        request_id="req-history",
+        input_ids=[1, 2],
+        output_ids=[7, 8],
+        status=RequestStatus.DECODING,
+        sampling_params=SamplingParams(max_new_tokens=4),
+    )
+
+    next_request = executor._prepare_next_single_request(
+        request=request,
+        hidden_states=torch.ones(1, 4),
+    )
+
+    assert isinstance(next_request, IntermediateRequest)
+    assert next_request.output_ids == [7, 8]
+    assert next_request.current_position == 4
+
+
+def test_prepare_next_single_request_keeps_prior_decode_history_on_last_peer():
+    executor = _make_executor(is_first_peer=False, is_last_peer=True)
+    executor._gen_token_id_from_hidden = lambda hidden_states: (13, hidden_states)
+    request = IntermediateRequest(
+        request_id="req-last-peer",
+        current_position=3,
+        status=RequestStatus.DECODING,
+        input_ids=[1, 2],
+        output_ids=[11],
+        hidden_states=torch.zeros(1, 4),
+        sampling_params=SamplingParams(max_new_tokens=4),
+    )
+
+    next_request = executor._prepare_next_single_request(
+        request=request,
+        hidden_states=torch.ones(1, 4),
+    )
+
+    assert isinstance(next_request, IntermediateRequest)
+    assert next_request.output_ids == [11]
+    assert next_request.next_token_id == 13
+    assert next_request.current_position == 3

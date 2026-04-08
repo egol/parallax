@@ -41,8 +41,13 @@ def request_to_proto(
     for request in requests:
         proto_req = forward_pb2.Req()
         proto_req.rid = request.request_id
-        proto_req.output_length = request.current_position - len(request.input_ids)
+        output_ids = getattr(request, "output_ids", None) or []
+        proto_req.output_length = (
+            len(output_ids) if output_ids else request.current_position - len(request.input_ids)
+        )
         proto_req.input_ids.extend(request.input_ids)
+        if output_ids:
+            proto_req.output_ids.extend(output_ids)
         proto_req.routing_table.extend(request.routing_table)
         proto_req.sampling_params.CopyFrom(sampling_params_to_proto(request.sampling_params))
         proto_req.lora_path = request.lora_path if request.lora_path is not None else ""
@@ -79,7 +84,9 @@ def proto_to_request(
     requests = []
 
     for proto_req in proto_request.reqs:
-        current_position = len(proto_req.input_ids) + proto_req.output_length
+        output_ids = list(proto_req.output_ids)
+        output_length = len(output_ids) if output_ids else proto_req.output_length
+        current_position = len(proto_req.input_ids) + output_length
 
         next_token_id = proto_req.next_token_id
 
@@ -115,6 +122,7 @@ def proto_to_request(
             current_position=current_position,
             status=status,
             input_ids=list(proto_req.input_ids),
+            output_ids=output_ids,
             hidden_states=hidden_states,
             residual_states=residual_states,
             routing_table=list(proto_req.routing_table),

@@ -842,11 +842,14 @@ class BaseExecutor:
             ), "Invalid request type for decoding."
 
             next_token_id, hidden_states = self._gen_token_id_from_hidden(hidden_states)
+            output_ids = list(getattr(request, "output_ids", None) or [])
+            output_ids.append(next_token_id)
             return IntermediateRequest(
                 request_id=request.request_id,
                 status=RequestStatus.DECODING,
                 current_position=request.total_length + 1,
                 input_ids=request.input_ids,
+                output_ids=output_ids,
                 hidden_states=hidden_states,
                 residual_states=None,
                 next_token_id=next_token_id,
@@ -867,6 +870,7 @@ class BaseExecutor:
                 status=RequestStatus.DECODING,  # Last peer always changes status to DECODING
                 current_position=request.total_length,
                 input_ids=request.input_ids,
+                output_ids=request.output_ids,
                 hidden_states=hidden_states,
                 residual_states=None,
                 next_token_id=next_token_id,

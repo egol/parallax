@@ -30,8 +30,9 @@ def test_cpu_request_round_trip():
     original = IntermediateRequest(
         request_id="cpu-request",
         input_ids=[1, 2, 3],
-        current_position=3,
-        status=RequestStatus.PREFILLING,
+        output_ids=[4, 5],
+        current_position=5,
+        status=RequestStatus.DECODING,
         hidden_states=torch.tensor([[1.0, 2.0, 3.0]], dtype=torch.float32),
         residual_states=torch.tensor([[4.0, 5.0, 6.0]], dtype=torch.float32),
         sampling_params=SamplingParams(temperature=0.0, max_new_tokens=4),
@@ -47,6 +48,7 @@ def test_cpu_request_round_trip():
     assert restored_request.request_id == original.request_id
     assert restored_request.status == original.status
     assert restored_request.input_ids == original.input_ids
+    assert restored_request.output_ids == original.output_ids
     assert restored_request.routing_table == original.routing_table
     assert torch.equal(restored_request.hidden_states, original.hidden_states)
     assert torch.equal(restored_request.residual_states, original.residual_states)
