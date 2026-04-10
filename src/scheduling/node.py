@@ -21,7 +21,7 @@ from scheduling.model_info import ModelInfo
 
 logger = get_logger(__name__)
 
-DEFAULT_MLX_MEMORY_RESERVE_GB = 1.0
+DEFAULT_MLX_MEMORY_RESERVE_GB = 5.0
 
 
 def get_mlx_memory_reserve_gb() -> float:
